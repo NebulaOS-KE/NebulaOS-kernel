@@ -42,6 +42,14 @@ MODULE_PARM_DESC(nowayout,
                  "Watchdog cannot be stopped once started (default="
                  __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
 
+/* NebulaOS G117(b): read-only marker that this driver arms with a programmed
+ * timeout (ingenic_wdt_program); /sys/module/ingenic_wdt/parameters/
+ * nebulaos_arm_fix = Y. The Hardware Agent's watchdog-arm exercise refuses a
+ * kernel without it (the vendor start() could reset the printer at once). */
+static bool nebulaos_arm_fix = true;
+module_param(nebulaos_arm_fix, bool, 0444);
+MODULE_PARM_DESC(nebulaos_arm_fix, "start() programs the timeout before enabling (read-only)");
+
 static unsigned int heartbeat = DEFAULT_HEARTBEAT;
 module_param(heartbeat, uint, 0);
 MODULE_PARM_DESC(heartbeat,
