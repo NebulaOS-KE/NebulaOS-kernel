@@ -126,41 +126,52 @@ static  void wdt_set_half_and_full(struct ingenic_wdt_drvdata *drvdata, unsigned
 	writel(tmp, drvdata->base + INGENIC_REG_WDT_TIMER_DATA);
 }
 
+/* NebulaOS G117(b) (Run 21): arm with a known timeout. The vendor start()
+ * only set the enable bit, so opening /dev/watchdog armed whatever TDR value
+ * the last reboot left (the platform reboot is itself a WDT reset with a
+ * ~4 ms TDR, soc-x2000/reset.c jz_wdt_restart) before WDIOC_SETTIMEOUT came
+ * - an instant reset at every boot. Now start() and a set_timeout on a
+ * running watchdog both stop the counter, program the full/half values and
+ * the prescaler, clear the counter (CLRZ) and only then enable it. The
+ * vendor set_timeout also compared drvdata->timeout with wdt_dev->timeout
+ * (equal after the first call) instead of the new value, so a second,
+ * different timeout was silently ignored. */
+static void ingenic_wdt_program(struct ingenic_wdt_drvdata *drvdata, unsigned int timeout)
+{
+	unsigned long timeout_value;
+
+	writeb(0x0, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
+
+	/* prescaler 1024; the full value caps the timeout (FULL_MAX * 1024 / rate) */
+	timeout_value = clk_get_rate(drvdata->wdt_clk) * timeout / 1024;
+	if (timeout_value > INGENIC_WDT_FULL_MAX) {
+		timeout_value = INGENIC_WDT_FULL_MAX;
+	}
+
+	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
+	writel(INGENIC_WDT_TIMER_STOP, drvdata->base + INGENIC_REG_WDT_TIMER_STOP_CLR);
+
+	/*Reach this value set to reboot*/
+	wdt_set_half_and_full(drvdata, timeout_value, 'F');
+
+	/*When the set value is reached, the flag bit will be set to 1 and an interrupt will be triggered.*/
+	wdt_set_half_and_full(drvdata, timeout_value * 2 / 3, 'H');
+
+	/*set prescal clzr rtc_en*/
+	writew(INGENIC_WDT_CLOCK_DIV_1024 | INGENIC_WDT_CLOCK_RTC | INGENIC_WDT_CLOCK_CLRZ, drvdata->base + INGENIC_REG_WDT_TIMER_CONTROL);
+	writeb(0x1, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
+
+	drvdata->timeout = timeout;
+}
+
 static int ingenic_wdt_set_timeout(struct watchdog_device *wdt_dev,
                                    unsigned int new_timeout)
 {
 	struct ingenic_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
-	unsigned int rtc_clk_rate;
-	unsigned int timeout_value;
-	short clock_div = INGENIC_WDT_CLOCK_DIV_1;
 
-	if (drvdata->timeout != wdt_dev->timeout) {
-
-		writeb(0x0, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
-		rtc_clk_rate = clk_get_rate(drvdata->wdt_clk);
-
-		/*new_timeout max = 2047s */
-		clock_div = INGENIC_WDT_CLOCK_DIV_1024;
-		timeout_value = rtc_clk_rate * new_timeout / 1024;
-
-		if (timeout_value > INGENIC_WDT_FULL_MAX) {
-			timeout_value = INGENIC_WDT_FULL_MAX;
-		}
-
-		writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
-		writel(INGENIC_WDT_TIMER_STOP, drvdata->base + INGENIC_REG_WDT_TIMER_STOP_CLR);
-
-		/*Reach this value set to reboot*/
-		wdt_set_half_and_full(drvdata, timeout_value, 'F');
-
-		/*When the set value is reached, the flag bit will be set to 1 and an interrupt will be triggered.*/
-		wdt_set_half_and_full(drvdata, timeout_value * 2 / 3, 'H');
-
-		/*set prescal clzr rtc_en*/
-		writew(clock_div | INGENIC_WDT_CLOCK_RTC | INGENIC_WDT_CLOCK_CLRZ, drvdata->base + INGENIC_REG_WDT_TIMER_CONTROL);
-		writeb(0x1, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
-
-		drvdata->timeout = wdt_dev->timeout = new_timeout;
+	wdt_dev->timeout = new_timeout;
+	if (watchdog_active(wdt_dev)) {
+		ingenic_wdt_program(drvdata, new_timeout);
 	}
 	return 0;
 }
@@ -168,10 +179,7 @@ static int ingenic_wdt_set_timeout(struct watchdog_device *wdt_dev,
 static int ingenic_wdt_start(struct watchdog_device *wdt_dev)
 {
 	struct ingenic_wdt_drvdata *drvdata = watchdog_get_drvdata(wdt_dev);
-	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
-	writeb(0x1, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
-	//ingenic_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
-
+	ingenic_wdt_program(drvdata, wdt_dev->timeout);
 	return 0;
 }
 
@@ -285,6 +293,16 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 
 	clk_prepare_enable(drvdata->wdt_clk);
 	clk_prepare_enable(drvdata->tcu_clk);
+
+	/* NebulaOS G117(b): the real maximum is FULL_MAX ticks at rate/1024
+	 * (~1431 s at 46875 Hz), not MAX_HEARTBEAT */
+	if (clk_get_rate(drvdata->wdt_clk) > 0) {
+		unsigned int hw_max = INGENIC_WDT_FULL_MAX * 1024UL / clk_get_rate(drvdata->wdt_clk);
+		if (hw_max >= 1 && hw_max < ingenic_wdt->max_timeout)
+			ingenic_wdt->max_timeout = hw_max;
+		if (ingenic_wdt->timeout > ingenic_wdt->max_timeout)
+			ingenic_wdt->timeout = ingenic_wdt->max_timeout;
+	}
 
 	ret = watchdog_register_device(&drvdata->wdt);
 	if (ret < 0) {
