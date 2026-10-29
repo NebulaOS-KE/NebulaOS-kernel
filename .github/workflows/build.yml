@@ -1,0 +1,41 @@
+name: kernel build
+
+# Compile check of the NebulaOS kernel (kernel/kernel-6.6, the firmware's
+# BR2_LINUX_KERNEL_DEFCONFIG nebulaos_halley5_v30, image target xImage) with
+# Ubuntu's MIPS cross compiler (GCC 13, as the image's Buildroot toolchain).
+# The built-in Wi-Fi firmware blobs (CONFIG_EXTRA_FIRMWARE) come from the
+# firmware build and are left out here; the shipped kernel is built by
+# NebulaOS-firmware.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: kernel/kernel-6.6
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cross compiler and tools
+        working-directory: .
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-mipsel-linux-gnu u-boot-tools bc bison flex libssl-dev
+      - name: Configure
+        run: |
+          make ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- nebulaos_halley5_v30_defconfig
+          scripts/config --set-str EXTRA_FIRMWARE ""
+          make ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- olddefconfig
+      - name: Build xImage
+        run: make -j"$(nproc)" ARCH=mips CROSS_COMPILE=mipsel-linux-gnu- xImage
+      - name: Result
+        run: |
+          ls -l vmlinux arch/mips/boot/compressed/xImage
+          mkimage -l arch/mips/boot/compressed/xImage | tee -a "$GITHUB_STEP_SUMMARY"
