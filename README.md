@@ -1,5 +1,7 @@
 # NebulaOS Kernel
 
+> Part of [NebulaOS](https://github.com/NebulaOS-KE/NebulaOS): open firmware for the Creality Ender-3 V3 KE. The project map, releases and downloads are there.
+
 The Linux 6.6 kernel SDK [NebulaOS](https://github.com/NebulaOS-KE/NebulaOS) runs on the Creality
 Ender-3 V3 KE (Ingenic X2000).
 
