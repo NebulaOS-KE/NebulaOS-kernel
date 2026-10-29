@@ -1,6 +1,6 @@
 # NebulaOS Kernel
 
-The Linux 6.6 kernel SDK [NebulaOS](https://github.com/coreflake1/NebulaOS) runs on the Creality
+The Linux 6.6 kernel SDK [NebulaOS](https://github.com/NebulaOS-KE/NebulaOS) runs on the Creality
 Ender-3 V3 KE (Ingenic X2000).
 
 Yes, the main branch here is called `openke`. That's an old branch name we kept for history — this
@@ -16,7 +16,7 @@ and never got renamed for branding reasons.
 ## You probably don't want to build this repo directly
 
 If you want the complete NebulaOS image, start at
-[`NebulaOS-firmware`](https://github.com/coreflake1/NebulaOS-firmware) instead. It pins an exact
+[`NebulaOS-firmware`](https://github.com/NebulaOS-KE/NebulaOS-firmware) instead. It pins an exact
 commit of this repo's `openke` branch, fetches just the kernel source it needs (a sparse checkout —
 the full SDK here is ~684MB), and applies 8 build-time kernel variants on top before compiling.
 
@@ -40,9 +40,9 @@ order doesn't actually matter — each one touches its own files):
 The install/update/recovery docs all live in `NebulaOS-firmware`, not here — this repo is just
 kernel source:
 
-- [`NebulaOS-firmware` wiki](https://github.com/coreflake1/NebulaOS-firmware/wiki)
-- [Build From Source](https://github.com/coreflake1/NebulaOS-firmware/blob/main/docs/BUILD_FROM_SOURCE.md) — how this repo's `openke` branch actually gets pulled in and patched
-- [A/B Slot Model](https://github.com/coreflake1/NebulaOS-firmware/blob/main/docs/A_B_SLOT_MODEL.md)
+- [`NebulaOS-firmware` wiki](https://github.com/NebulaOS-KE/NebulaOS-firmware/wiki)
+- [Build From Source](https://github.com/NebulaOS-KE/NebulaOS-firmware/blob/main/docs/BUILD_FROM_SOURCE.md) — how this repo's `openke` branch actually gets pulled in and patched
+- [A/B Slot Model](https://github.com/NebulaOS-KE/NebulaOS-firmware/blob/main/docs/A_B_SLOT_MODEL.md)
 
 ## License
 
