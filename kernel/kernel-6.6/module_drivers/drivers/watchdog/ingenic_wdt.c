@@ -29,6 +29,7 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
+#include <soc/cpm.h>
 #include "ingenic_wdt.h"
 
 #define IRQ_SWITCH  0
@@ -49,6 +50,23 @@ MODULE_PARM_DESC(nowayout,
 static bool nebulaos_arm_fix = true;
 module_param(nebulaos_arm_fix, bool, 0444);
 MODULE_PARM_DESC(nebulaos_arm_fix, "start() programs the timeout before enabling (read-only)");
+
+/* NebulaOS black box (Run 24, 2026-11-06): why the SoC last reset, read
+ * from the CPM reset status register at probe and then cleared, so every
+ * boot reports only its own reset. /sys/module/ingenic_wdt/parameters/
+ * nebulaos_reset_rsr: bit 0 PR (reset pin), bit 1 WR (watchdog - also how
+ * the platform does every software restart and the panic restart,
+ * soc-x2000/reset.c jz_wdt_restart), bit 2 P0R (power-on). Telling a
+ * watchdog fire from a software restart is left to the boot script, which
+ * reads the kernel's own "reboot:" line from pstore. nebulaos_reset_cppsr
+ * is the scratch word jz_wdt_restart writes (reboot/recovery signature),
+ * as the bootloader left it. Read-only, informational. */
+static unsigned int nebulaos_reset_rsr;
+module_param(nebulaos_reset_rsr, uint, 0444);
+MODULE_PARM_DESC(nebulaos_reset_rsr, "CPM reset status at boot (read-only)");
+static unsigned int nebulaos_reset_cppsr;
+module_param(nebulaos_reset_cppsr, uint, 0444);
+MODULE_PARM_DESC(nebulaos_reset_cppsr, "CPM CPPSR scratch word at boot (read-only)");
 
 static unsigned int heartbeat = DEFAULT_HEARTBEAT;
 module_param(heartbeat, uint, 0);
@@ -353,6 +371,16 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	}
 #endif
 	platform_set_drvdata(pdev, drvdata);
+
+	nebulaos_reset_rsr = cpm_inl(CPM_RSR);
+	nebulaos_reset_cppsr = cpm_inl(CPM_CPPSR);
+	cpm_outl(0, CPM_RSR);
+	pr_info("ingenic_wdt: reset status RSR=0x%08x%s%s%s CPPSR=0x%08x\n",
+		nebulaos_reset_rsr,
+		(nebulaos_reset_rsr & (1 << 2)) ? " power-on" : "",
+		(nebulaos_reset_rsr & (1 << 1)) ? " watchdog" : "",
+		(nebulaos_reset_rsr & (1 << 0)) ? " reset-pin" : "",
+		nebulaos_reset_cppsr);
 
 	pr_info("ingenic watchdog probe success\n");
 	return 0;
