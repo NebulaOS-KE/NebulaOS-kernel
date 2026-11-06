@@ -359,7 +359,19 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	 */
 	writeb(0x0, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
 
+#if IRQ_SWITCH
 	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_CLR);
+#else
+	/* NebulaOS black box (Run 24, 2026-11-06): with no handler (IRQ_SWITCH
+	 * 0) the WDT interrupt must stay MASKED. The vendor code unmasked it
+	 * here (MASK_CLR), so 40 s after the last feed (the 'H' compare at
+	 * 2/3 of the timeout) its flag held the shared TCU line asserted and
+	 * irq/35-ingenic-tcu-interrupt ran at 100% for the last ~20 s before
+	 * every watchdog reset - seen on ke-dev in the heartbeat of a
+	 * watchdog-fire test. Never reached while the feeder runs. The reset
+	 * itself does not depend on this interrupt. */
+	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_SET);
+#endif
 	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
 #if IRQ_SWITCH
 	ret = request_irq(drvdata->irq, ingenic_wdt_interrupt,
