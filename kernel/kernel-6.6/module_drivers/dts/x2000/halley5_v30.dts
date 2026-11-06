@@ -51,7 +51,9 @@
 		       * ROTATE/VCODEC unset); dpu uses dma_alloc_coherent from the
 		       * buddy allocator. A disabled node is skipped by
 		       * fdt_scan_reserved_mem() (drivers/of/fdt.c). Re-enable
-		       * together with any of those drivers. */
+		       * together with any of those drivers - and move ramoops
+		       * below first: on this 256 MB board this pool selects
+		       * reg-256M = 0x0e000000 + 32 MB, which contains it. */
 		      status = "disabled";
 		      reg-64M = <0x03000000 0x1000000>;
 		      reg-128M = <0x06000000 0x2000000>;
@@ -74,6 +76,7 @@
 			console-size = <0x80000>;	/* 512 KB kernel log */
 			pmsg-size = <0x40000>;		/* 256 KB heartbeat */
 			ecc-size = <16>;
+			mem-type = <1>;			/* unbuffered: no write lost at a hard reset */
 		};
 	};
 

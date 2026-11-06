@@ -58,9 +58,9 @@ MODULE_PARM_DESC(nebulaos_arm_fix, "start() programs the timeout before enabling
  * the platform does every software restart and the panic restart,
  * soc-x2000/reset.c jz_wdt_restart), bit 2 P0R (power-on). Telling a
  * watchdog fire from a software restart is left to the boot script, which
- * reads the kernel's own "reboot:" line from pstore. nebulaos_reset_cppsr
- * is the scratch word jz_wdt_restart writes (reboot/recovery signature),
- * as the bootloader left it. Read-only, informational. */
+ * uses nebulaos_reset_cppsr: the scratch word jz_wdt_restart sets to
+ * REBOOT_SIGNATURE (0x3535) before every software or panic restart and a
+ * watchdog fire never writes; read, then cleared here. Read-only. */
 static unsigned int nebulaos_reset_rsr;
 module_param(nebulaos_reset_rsr, uint, 0444);
 MODULE_PARM_DESC(nebulaos_reset_rsr, "CPM reset status at boot (read-only)");
@@ -375,6 +375,12 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	nebulaos_reset_rsr = cpm_inl(CPM_RSR);
 	nebulaos_reset_cppsr = cpm_inl(CPM_CPPSR);
 	cpm_outl(0, CPM_RSR);
+	/* Clear the reboot signature too (same unlock as jz_wdt_restart), so
+	 * the next boot sees 0x3535 only if THIS boot ended in a software or
+	 * panic restart - a watchdog fire after a freeze never writes it. */
+	cpm_outl(0x5a5a, CPM_CPSPPR);
+	cpm_outl(0, CPM_CPPSR);
+	cpm_outl(0x0, CPM_CPSPPR);
 	pr_info("ingenic_wdt: reset status RSR=0x%08x%s%s%s CPPSR=0x%08x\n",
 		nebulaos_reset_rsr,
 		(nebulaos_reset_rsr & (1 << 2)) ? " power-on" : "",
