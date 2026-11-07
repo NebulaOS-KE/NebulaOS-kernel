@@ -20,22 +20,12 @@ and never got renamed for branding reasons.
 If you want the complete NebulaOS image, start at
 [`NebulaOS-firmware`](https://github.com/NebulaOS-KE/NebulaOS-firmware) instead. It pins an exact
 commit of this repo's `openke` branch, fetches just the kernel source it needs (a sparse checkout —
-the full SDK here is ~684MB), and applies 8 build-time kernel variants on top before compiling.
+the full SDK here is ~684MB) and builds it with this repo's own production config,
+`kernel/kernel-6.6/arch/mips/configs/nebulaos_halley5_v30_defconfig`. Nothing is patched at build
+time: every NebulaOS kernel change is a commit on `openke`.
 
-## The 8 build-time variants
-
-These live in `NebulaOS-firmware`, not here — this repo only holds the base kernel source they
-patch at build time. Applied in order by `scripts/build/apply-qualified-baseline.sh` (though the
-order doesn't actually matter — each one touches its own files):
-
-1. PREEMPT_RT
-2. WiFi SDIO IRQ priority
-3. VSYNC-gated display panning
-4. A pinctrl ownership fix
-5. The final backlight controller
-6. PWM state readback
-7. The final touch driver
-8. Disabling WiFi roaming
+The tree is based on linux-stable-rt v6.6.157-rt79, but since NebulaOS 1.0.2 the kernel is built
+with `CONFIG_PREEMPT`, not `CONFIG_PREEMPT_RT` (one line in that defconfig to switch back).
 
 ## If you're setting up a device
 
@@ -43,7 +33,7 @@ The install/update/recovery docs all live in `NebulaOS-firmware`, not here — t
 kernel source:
 
 - [`NebulaOS-firmware` wiki](https://github.com/NebulaOS-KE/NebulaOS-firmware/wiki)
-- [Build From Source](https://github.com/NebulaOS-KE/NebulaOS-firmware/blob/main/docs/BUILD_FROM_SOURCE.md) — how this repo's `openke` branch actually gets pulled in and patched
+- [Build From Source](https://github.com/NebulaOS-KE/NebulaOS-firmware/blob/main/docs/BUILD_FROM_SOURCE.md) — how this repo's `openke` branch actually gets pulled in
 - [A/B Slot Model](https://github.com/NebulaOS-KE/NebulaOS-firmware/blob/main/docs/A_B_SLOT_MODEL.md)
 
 ## License
