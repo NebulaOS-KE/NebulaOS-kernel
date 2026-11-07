@@ -246,7 +246,10 @@ static int persistent_ram_init_ecc(struct persistent_ram_zone *prz,
 		pr_info("error in header, %d\n", numerr);
 		prz->corrected_bytes += numerr;
 	} else if (numerr < 0) {
-		pr_info_ratelimited("uncorrectable error in header\n");
+		/* NebulaOS: normal on every boot after a power-on (the zone
+		 * holds random RAM) - the black box reports whether pstore held
+		 * a previous boot; at info level this read like a fault. */
+		pr_debug("uncorrectable error in header\n");
 		prz->bad_blocks++;
 	}
 

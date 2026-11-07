@@ -395,9 +395,11 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	cpm_outl(0x0, CPM_CPSPPR);
 	pr_info("ingenic_wdt: reset status RSR=0x%08x%s%s%s CPPSR=0x%08x\n",
 		nebulaos_reset_rsr,
-		(nebulaos_reset_rsr & (1 << 2)) ? " power-on" : "",
+		/* soc-x2000 cpm.h: RSR_PR BIT0 (power-on; 0x1 after switching
+		 * on, proven on ke-dev), RSR_WR BIT1, RSR_P0R BIT2. */
+		(nebulaos_reset_rsr & (1 << 0)) ? " power-on" : "",
 		(nebulaos_reset_rsr & (1 << 1)) ? " watchdog" : "",
-		(nebulaos_reset_rsr & (1 << 0)) ? " reset-pin" : "",
+		(nebulaos_reset_rsr & (1 << 2)) ? " p0-reset" : "",
 		nebulaos_reset_cppsr);
 
 	pr_info("ingenic watchdog probe success\n");
