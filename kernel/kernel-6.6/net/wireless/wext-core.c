@@ -642,7 +642,10 @@ static void wireless_warn_cfg80211_wext(void)
 {
 	char name[sizeof(current->comm)];
 
-	pr_warn_once("warning: `%s' uses wireless extensions which will stop working for Wi-Fi 7 hardware; use nl80211\n",
+	/* NebulaOS: debug, not a warning - the black box heartbeat reads the
+	 * link quality from /proc/net/wireless every 10 s (CYW43430 is not a
+	 * Wi-Fi 7 chip), and this otherwise lands in every boot's log. */
+	pr_debug_once("warning: `%s' uses wireless extensions which will stop working for Wi-Fi 7 hardware; use nl80211\n",
 		     get_task_comm(name, current));
 }
 #endif

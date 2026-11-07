@@ -396,9 +396,13 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	pr_info("ingenic_wdt: reset status RSR=0x%08x%s%s%s CPPSR=0x%08x\n",
 		nebulaos_reset_rsr,
 		/* soc-x2000 cpm.h: RSR_PR BIT0 (power-on; 0x1 after switching
-		 * on, proven on ke-dev), RSR_WR BIT1, RSR_P0R BIT2. */
+		 * on, proven on ke-dev), RSR_WR BIT1, RSR_P0R BIT2. Every
+		 * software or panic restart also goes through the watchdog
+		 * (jz_wdt_restart) and leaves REBOOT_SIGNATURE 0x3535 in CPPSR;
+		 * only WR without it is a watchdog fire. */
 		(nebulaos_reset_rsr & (1 << 0)) ? " power-on" : "",
-		(nebulaos_reset_rsr & (1 << 1)) ? " watchdog" : "",
+		!(nebulaos_reset_rsr & (1 << 1)) ? "" :
+			nebulaos_reset_cppsr == 0x3535 ? " restart" : " watchdog",
 		(nebulaos_reset_rsr & (1 << 2)) ? " p0-reset" : "",
 		nebulaos_reset_cppsr);
 
