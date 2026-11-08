@@ -301,6 +301,12 @@ static int i2c_ingenic_enable(struct i2c_ingenic *i2c, int enable)
 
 static void i2c_ingenic_reset(struct i2c_ingenic *i2c)
 {
+	/* NebulaOS (2026-11-08, freeze investigation): a timed-out transfer
+	 * left its interrupt mask (RXFL/TXABT/STP) enabled, and the clock is
+	 * gated right after the reset - a late reply from the device then ran
+	 * i2c_ingenic_irq against a clock-gated block. Mask first; every
+	 * transfer sets INTM again before it waits. */
+	i2c_writel(i2c, I2C_INTM, 0);
 	i2c_readl(i2c, I2C_CTXABRT);
 	i2c_readl(i2c, I2C_INTST);
 
@@ -776,7 +782,10 @@ static inline int xfer_write(struct i2c_ingenic *i2c, unsigned char *buf, int le
 static int i2c_disable_clk(struct i2c_ingenic *i2c)
 {
 	int timeout = 10;
-	int tmp = i2c_readl(i2c, I2C_STA);
+	int tmp;
+
+	i2c_writel(i2c, I2C_INTM, 0);   /* NebulaOS: no interrupt once the clock is gated */
+	tmp = i2c_readl(i2c, I2C_STA);
 
 	while ((tmp & I2C_STA_MSTACT) && (--timeout > 0)) {
 		udelay(90);
