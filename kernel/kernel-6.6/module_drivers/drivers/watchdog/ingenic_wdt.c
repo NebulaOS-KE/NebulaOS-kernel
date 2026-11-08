@@ -28,6 +28,8 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
+#include <linux/sched/debug.h>
+#include <linux/nmi.h>
 #include <linux/of.h>
 #include <soc/cpm.h>
 #include "ingenic_wdt.h"
@@ -126,6 +128,47 @@ static irqreturn_t ingenic_wdt_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 #endif
+
+/* NebulaOS freeze diagnosis (2026-11-08). The 'H' compare (2/3 of the
+ * timeout: 40 s of the 60 s the feeder arms) is reached only when the
+ * userspace feeder has not fed for 40 s - the printer is frozen or nearly
+ * so. Until now that left no trace: the kernel's own detectors run from
+ * timers and printed nothing in the real mid-print freeze of 2026-11-08.
+ * This is a device interrupt (the TCU line, RTC-clocked), so it still
+ * arrives when every kernel timer is dead, as long as the CPU it is routed
+ * to takes interrupts. It masks itself (one shot, no storm), restarts the
+ * hardware count so the dump has a full timeout to finish, prints the
+ * clockevent state, the blocked tasks and every CPU's backtrace, then
+ * panics: the panic writes the whole kernel log into pstore (the record
+ * zone), past a console lock a frozen CPU might hold. If this never fires
+ * before a watchdog reset, the CPU that owns the line had interrupts off
+ * the whole time - also an answer. */
+extern void nebulaos_core_ost_dump(void);
+
+static irqreturn_t nebulaos_wdt_pretimeout(int irq, void *dev_id)
+{
+	struct ingenic_wdt_drvdata *drvdata = dev_id;
+
+	if (!(readl(drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_RD) & INGENIC_WDT_TIMER_FLAG))
+		return IRQ_NONE;	/* shared TCU line: not ours */
+	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_SET);
+	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
+	/* A software restart (soc-x2000/reset.c jz_wdt_restart) rewrites the
+	 * whole data register with a 4 ms count, which leaves the 'H' compare
+	 * at 0: the flag rises at once. That is a reboot, not a freeze. */
+	if (system_state != SYSTEM_RUNNING)
+		return IRQ_HANDLED;
+	writel(readl(drvdata->base + INGENIC_REG_WDT_TIMER_CONTROL) | INGENIC_WDT_CLOCK_CLRZ,
+	       drvdata->base + INGENIC_REG_WDT_TIMER_CONTROL);
+
+	pr_emerg("nebulaos-freeze: watchdog not fed for %u s (cpu%d, jiffies %lu) - dumping state\n",
+		 drvdata->timeout * 2 / 3, smp_processor_id(), jiffies);
+	nebulaos_core_ost_dump();
+	show_state_filter(TASK_UNINTERRUPTIBLE);
+	trigger_all_cpu_backtrace();
+	panic("nebulaos-freeze: watchdog pre-timeout");
+	return IRQ_HANDLED;
+}
 
 static int ingenic_wdt_ping(struct watchdog_device *wdt_dev)
 {
@@ -373,6 +416,16 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_SET);
 #endif
 	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
+#if !IRQ_SWITCH
+	/* The pre-timeout dump (nebulaos_wdt_pretimeout): it clears and masks
+	 * the flag itself, so unmasking is safe now that a handler exists. */
+	ret = request_irq(drvdata->irq, nebulaos_wdt_pretimeout,
+	                  IRQF_SHARED | IRQF_TRIGGER_LOW, "watchdog-pretimeout", drvdata);
+	if (ret)
+		dev_err(&pdev->dev, "pre-timeout irq %d: %d (no freeze dump)\n", drvdata->irq, ret);
+	else
+		writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_CLR);
+#endif
 #if IRQ_SWITCH
 	ret = request_irq(drvdata->irq, ingenic_wdt_interrupt,
 	                  IRQF_SHARED | IRQF_TRIGGER_LOW, "watchdog-int", drvdata);
