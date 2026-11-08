@@ -203,16 +203,43 @@ static struct tmr_src g_tmr_src = {
 	}
 };
 
+/* Lockless high/low/high read of the free-running 64-bit global counter. */
+static u64 nebulaos_ost_read_cnt(void __iomem *iobase)
+{
+	u32 hi, lo;
+
+	do {
+		hi = ost_readl(iobase + G_OSTCNTH);
+		lo = ost_readl(iobase + G_OSTCNTL);
+	} while (hi != ost_readl(iobase + G_OSTCNTH));
+	return ((u64)hi << 32) | lo;
+}
+
 static unsigned long long sched_clock(void)
 {
 	struct tmr_src *tmr = &g_tmr_src;
+	unsigned long flags;
+	u64 cycles;
 	if (!tmr->iobase) {
 		return 0LL;
 	}
 	if (!ost_readl(tmr->iobase + G_OSTER)) {
 		return 0LL;
 	}
-	return ((u64)core_clocksource_get_cycles(&tmr->cs)); // * tmr_src.cs.mult) >> tmr_src.cs.shift;
+	/* NebulaOS: printk timestamps come through here. If clocksource_lock
+	 * is held by a frozen CPU, the freeze dump (nebulaos_core_ost_dump via
+	 * the watchdog pre-timeout) would hang on its first line. So never
+	 * wait for the lock here: take it when free (unchanged behaviour),
+	 * otherwise read without it - the high/low/high retry in
+	 * nebulaos_ost_read_cnt() is correct on its own for this free-running,
+	 * read-only counter. */
+	if (raw_spin_trylock_irqsave(&clocksource_lock, flags)) {
+		cycles = nebulaos_ost_read_cnt(tmr->iobase);
+		raw_spin_unlock_irqrestore(&clocksource_lock, flags);
+	} else {
+		cycles = nebulaos_ost_read_cnt(tmr->iobase);
+	}
+	return cycles;
 }
 
 void __init core_clocksource_init(struct core_ost_chip *core_ost, struct tmr_src *tmr)
