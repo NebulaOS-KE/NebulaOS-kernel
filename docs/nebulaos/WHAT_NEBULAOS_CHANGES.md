@@ -3,14 +3,16 @@
 This repository is mostly a vendor SDK. This page answers the question a developer actually
 arrives with: **which parts are NebulaOS, and which are Ingenic's or OpenKE's?**
 
-Written against the `openke` branch at `d86790d`.
+Written against the `openke` branch at `95d0321e`, which is also what ships: the firmware
+manifest at tag `v1.0.2` pins `KERNEL_PIN=95d0321ef4270adb3e080fe2125ab81fcb232b91` with
+`KERNEL_BRANCH=openke`, and that is the branch tip.
 
 ## Branch layout
 
 | Branch | What it is |
 |---|---|
 | `main` | `a98c2e1f2`, "initial release" - the **pristine vendor baseline**, forked from `Llixuma/ingenic-linux-kernel6.6-x2000-v1.0-20250221` |
-| `openke` | The branch NebulaOS builds from: 122 commits on top of that baseline |
+| `openke` | The branch NebulaOS builds from: 133 commits on top of that baseline |
 
 `openke` is the default branch, and the one to read. `main` exists so the vendor baseline stays
 available for comparison - `git diff origin/main origin/openke` is the complete set of changes.
@@ -19,9 +21,9 @@ available for comparison - `git diff origin/main origin/openke` is the complete 
 NebulaOS's footprint. Most of it is the vendor tree reorganisation that came with the OpenKE
 import. The NebulaOS-specific surface is small and listed below.
 
-## The three layers on `openke`
+## The four layers on `openke`
 
-Reading the history from the baseline forward, the commits fall into three groups.
+Reading the history from the baseline forward, the commits fall into four groups.
 
 ### 1. The OpenKE layer
 
@@ -63,7 +65,7 @@ Eight commits, each with a `G`-number tying it to a NebulaOS workstream:
 
 Plus the configs - `nebulaos_halley5_v30_defconfig` and
 `nebulaos_halley5_v30_diagnostic.config` - which are the most-touched files in the repository
-(17 changes across the history), since every capability added has to be enabled somewhere.
+(25 changes across the history), since every capability added has to be enabled somewhere.
 
 ### How those changes connect outward
 
@@ -77,6 +79,72 @@ reading the kernel alone:
   someone cuts the power.
 - **Keeping the power-on picture through the display takeover** (`27fe61c54`) is why the boot
   logo does not flash to black before NebulaScreen appears.
+
+A fourth connection came with the diagnosis layer below: the reserved ramoops area and the
+reset-status registers are what the firmware's `nebulaos-blackbox` reads after a reboot, so
+"why did the printer restart?" has an answer on the printer itself.
+
+### 4. Freeze diagnosis and the black box
+
+Eleven commits, written after two real failures on the development printer: a partial hang on
+2026-11-06 (SSH and shell commands blocked for minutes while the screen and Klipper kept
+running) and a mid-print freeze on 2026-11-08 where both CPUs stopped and the hardware watchdog
+reset the board 60 s later **with nothing in the kernel log**. They are a diagnosis layer: they
+do not change how the printer prints, they change what is left behind when it stops.
+
+| Commit | Change | Where |
+|---|---|---|
+| `ef2a2c264` | pstore/ramoops in 1 MB of RAM, reset-status readback, soft-lockup panic; quiet EEPROM-busy I2C aborts | `dts/x2000/halley5_v30.dts`, defconfig, `watchdog/ingenic_wdt.c`, `i2c/busses/i2c-ingenic.c` |
+| `842860ab2` | Clear the CPM reboot signature at probe; unbuffered ramoops (`mem-type = <1>`) | `ingenic_wdt.c`, `halley5_v30.dts` |
+| `785b600f7` | Keep the unhandled WDT interrupt masked - it was holding the shared TCU line asserted | `ingenic_wdt.c` |
+| `b9245f14e` | Hung-task detector, report only (120 s, never panics) | defconfig |
+| `e5f4d8fe7` | RSR bit 0 named power-on; ramoops' empty-zone header message to debug | `ingenic_wdt.c`, `fs/pstore/ram_core.c` |
+| `11f0f0c87` | `CONFIG_PREEMPT` instead of `CONFIG_PREEMPT_RT`; `localversion-rt` removed; "restart" vs "watchdog" wording; the wireless-extensions warning to `pr_debug_once` | defconfig, `localversion-rt`, `ingenic_wdt.c`, `net/wireless/wext-core.c` |
+| `ece4732b0` | **Watchdog pre-timeout dump**: an interrupt 40 s without a feed prints the clockevent state, blocked tasks and every CPU backtrace, then panics; `nebulaos_core_ost_dump()`; hard-lockup (buddy) detector with panic | `ingenic_wdt.c`, `clocksource/ingenic_core_ost.c`, defconfig |
+| `3b6086868` | `sched_clock` takes `clocksource_lock` with trylock, so a freeze dump cannot hang on its own first timestamp | `ingenic_core_ost.c` |
+| `e8596387b` | `nebulaos_sdio_idle` module parameter for the Wi-Fi SDIO bus; a boot line saying whether KSO save/restore is in use | `brcm80211/brcmfmac/sdio.c` |
+| `95d0321ef` | I2C: `INTM = 0` before a controller reset and before the clock is gated | `i2c-ingenic.c` |
+
+Three of these are worth understanding in detail, because a developer will meet them in a log.
+
+**The black box is pstore/ramoops.** `halley5_v30.dts` reserves 1 MB at `0x0e000000`:
+512 KB console (the kernel log), 64 KB per oops/panic record, 256 KB `pmsg` for the userspace
+heartbeat, with ECC and `mem-type = <1>` so the last writes before a hard reset are not sitting
+in a write buffer. The address lies inside the vendor's own 256M ISP pool, which is `disabled`
+in the DTS and which the bootloader leaves alone - re-enabling that pool on a 256 MB board would
+overlap ramoops, and the DTS comment says so. The area survives a watchdog or panic reset and is
+read back from `/sys/fs/pstore` on the next boot; a real power cut loses it, as RAM does.
+The defconfig side is `CONFIG_PSTORE`, `PSTORE_RAM`, `PSTORE_CONSOLE`, `PSTORE_PMSG`, with
+`PSTORE_COMPRESS` off so the result is readable without tooling.
+
+**Three detectors, deliberately different.** `CONFIG_SOFTLOCKUP_DETECTOR` with
+`BOOTPARAM_SOFTLOCKUP_PANIC` panics a CPU stuck in the kernel, so the dump is kept and
+`PANIC_TIMEOUT=10` restarts the board instead of waiting out the 60 s hardware watchdog with
+nothing recorded. `HARDLOCKUP_DETECTOR` (the buddy detector, since this SoC has no NMI
+perf counter) with `BOOTPARAM_HARDLOCKUP_PANIC` covers a CPU that has stopped taking
+interrupts. `DETECT_HUNG_TASK` with `DEFAULT_HUNG_TASK_TIMEOUT=120` only *reports* -
+`BOOTPARAM_HUNG_TASK_PANIC` is deliberately off, because a slow eMMC must not restart a printer
+that is printing. That asymmetry is a decision, not an oversight.
+
+**The watchdog pre-timeout dump is the last resort.** `nebulaos_wdt_pretimeout()` in
+`ingenic_wdt.c` is hooked to the watchdog's `H` compare, which the hardware reaches at two
+thirds of the armed timeout - 40 s of the 60 s the userspace feeder arms. It is a device
+interrupt on the RTC-clocked TCU line, so it still arrives when every kernel timer is dead, as
+long as the CPU it is routed to still takes interrupts. It masks itself (one shot, no storm),
+restarts the hardware count so the dump has a full timeout to finish, prints
+`nebulaos_core_ost_dump()`, `show_state_filter(TASK_UNINTERRUPTIBLE)` and
+`trigger_all_cpu_backtrace()`, and then panics on purpose, because the panic path is what writes
+the whole kernel log into pstore past a console lock a frozen CPU may be holding. A software
+restart is not a freeze and is skipped (`system_state != SYSTEM_RUNNING`). **If this never fires
+and the board resets anyway, that is itself a result:** the CPU owning the line had interrupts
+disabled for the whole 40 s.
+
+**The Wi-Fi idle parameter is an experiment, not a fix.** `brcmfmac`'s SDIO bus sleeps after
+`idletime` watchdog ticks (10 ms each) without traffic; on the CYW43430 with save/restore that
+is a KSO sleep/wake of the chip thousands of times an hour on a quiet link.
+`/sys/module/brcmfmac/parameters/nebulaos_sdio_idle` is writable at runtime: `-1` (the default)
+keeps the driver's own `idletime`, `0` never sleeps the bus, `N` waits N ticks. **The default
+changes nothing**, which is what makes it an A/B test rather than a behaviour change.
 
 ## What the firmware build does *not* do any more
 
@@ -106,6 +174,19 @@ branch's tip is not, when the two differ.
 `.github/workflows/build.yml` compile-checks the kernel (`xImage`,
 `nebulaos_halley5_v30`) on push.
 
+## The scheduling model
+
+The kernel is built with **`CONFIG_PREEMPT`** (`nebulaos_halley5_v30_defconfig` line 7), not
+`CONFIG_PREEMPT_RT`. The tree is still based on `linux-stable-rt`, so the RT patch set is
+present in the source and the model is one defconfig line to switch; `localversion-rt` was
+removed in `11f0f0c87` so a kernel that is not RT does not report `-rt79` in `uname`.
+
+Two consequences a developer should know:
+
+- `NEBULAOS_KTIMERS_PRIO` is gone with it - `ktimers/N` threads only exist on RT.
+- The IRQ thread priority table stays and still applies: MIPS selects `IRQ_FORCED_THREADING`,
+  and the explicitly threaded handlers (`uart1`, DWC2, mmc) are threaded on `PREEMPT` too.
+
 ## The hardware
 
 | | |
@@ -125,7 +206,7 @@ means NebulaOS while the other system's is 4.4.
 - **The vendor SDK itself.** Most of this repository is Ingenic's, including
   `frameworks/`, `development/` and `external/`. Its own documentation is under `docs/doc/`,
   partly in Chinese.
-- **PREEMPT_RT and real-time behaviour.** Referenced in firmware analysis documents; not
-  established here.
+- **Real-time latency figures.** The scheduling model is stated below; no latency was measured
+  here.
 - **Hardware behaviour.** Nothing on this page was observed on a printer by its author.
 - **U-Boot**, which lives in `u-boot/` and has its own vendor history.

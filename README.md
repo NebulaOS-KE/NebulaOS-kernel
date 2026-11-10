@@ -49,6 +49,7 @@ you're actually using.
 
 Most of this repository is a vendor SDK.
 [What NebulaOS changes in this kernel](docs/nebulaos/WHAT_NEBULAOS_CHANGES.md) separates the
-three layers on `openke` - the inherited OpenKE work, five real hardware-bug fixes in the vendor
-board description, and NebulaOS's own eight changes - and explains why the firmware build no
-longer applies kernel patches.
+four layers on `openke` - the inherited OpenKE work, five real hardware-bug fixes in the vendor
+board description, NebulaOS's own eight changes and the eleven-commit freeze-diagnosis layer
+(pstore black box, lockup detectors, watchdog pre-timeout dump) - and explains why the firmware
+build no longer applies kernel patches.
