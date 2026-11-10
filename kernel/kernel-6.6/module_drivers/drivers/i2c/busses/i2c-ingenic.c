@@ -301,6 +301,12 @@ static int i2c_ingenic_enable(struct i2c_ingenic *i2c, int enable)
 
 static void i2c_ingenic_reset(struct i2c_ingenic *i2c)
 {
+	/* NebulaOS (2026-11-08, freeze investigation): a timed-out transfer
+	 * left its interrupt mask (RXFL/TXABT/STP) enabled, and the clock is
+	 * gated right after the reset - a late reply from the device then ran
+	 * i2c_ingenic_irq against a clock-gated block. Mask first; every
+	 * transfer sets INTM again before it waits. */
+	i2c_writel(i2c, I2C_INTM, 0);
 	i2c_readl(i2c, I2C_CTXABRT);
 	i2c_readl(i2c, I2C_INTST);
 
@@ -449,7 +455,10 @@ static irqreturn_t i2c_ingenic_irq(int irqno, void *dev_id)
 #endif
 
 	if ((intst & I2C_INTST_TXABT) && (intmsk & I2C_INTM_MTXABT)) {
-		dev_err(&(i2c->adap.dev),
+		/* NebulaOS (Run 24): debug, not error - the abort's cause is
+		 * reported by txabrt() once the transfer returns, at the level
+		 * that cause deserves. */
+		dev_dbg(&(i2c->adap.dev),
 		        "%s %d, I2C transfer error, ABORT interrupt\n",
 		        __func__, __LINE__);
 		goto END_TRSF_IRQ_HND;
@@ -578,14 +587,27 @@ END_TRSF_IRQ_HND:
 	return IRQ_HANDLED;
 }
 
+/* NebulaOS (Run 24, 2026-11-06): an abort whose only cause is "no device
+ * acknowledged the 7-bit address" (TXABRT == bit 0) is how an I2C device
+ * says "busy" - the BL24C16F EEPROM does it for ~5 ms after every write
+ * while it stores the page, and at24 polls it until it answers (the
+ * power-loss journal writes it every few seconds). The caller still gets
+ * the error and decides; logging each poll as an error only buried real
+ * faults. So that one case goes to debug; every other abort cause stays an
+ * error, as before. */
 static void txabrt(struct i2c_ingenic *i2c, int src)
 {
 	int i;
 
+	if (src == 0x1) {
+		dev_dbg(&(i2c->adap.dev), "--I2C txabrt: %s (device busy or absent)\n",
+		        abrt_src[0]);
+		return;
+	}
 	dev_err(&(i2c->adap.dev), "--I2C txabrt:\n");
 	for (i = 0; i < 16; i++) {
 		if (src & (0x1 << i))
-			dev_info(&(i2c->adap.dev), "--I2C TXABRT[%d]=%s\n", i,
+			dev_err(&(i2c->adap.dev), "--I2C TXABRT[%d]=%s\n", i,
 			         abrt_src[i]);
 	}
 }
@@ -760,7 +782,10 @@ static inline int xfer_write(struct i2c_ingenic *i2c, unsigned char *buf, int le
 static int i2c_disable_clk(struct i2c_ingenic *i2c)
 {
 	int timeout = 10;
-	int tmp = i2c_readl(i2c, I2C_STA);
+	int tmp;
+
+	i2c_writel(i2c, I2C_INTM, 0);   /* NebulaOS: no interrupt once the clock is gated */
+	tmp = i2c_readl(i2c, I2C_STA);
 
 	while ((tmp & I2C_STA_MSTACT) && (--timeout > 0)) {
 		udelay(90);

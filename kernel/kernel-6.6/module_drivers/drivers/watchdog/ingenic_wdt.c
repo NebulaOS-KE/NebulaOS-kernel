@@ -28,7 +28,10 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
+#include <linux/sched/debug.h>
+#include <linux/nmi.h>
 #include <linux/of.h>
+#include <soc/cpm.h>
 #include "ingenic_wdt.h"
 
 #define IRQ_SWITCH  0
@@ -49,6 +52,23 @@ MODULE_PARM_DESC(nowayout,
 static bool nebulaos_arm_fix = true;
 module_param(nebulaos_arm_fix, bool, 0444);
 MODULE_PARM_DESC(nebulaos_arm_fix, "start() programs the timeout before enabling (read-only)");
+
+/* NebulaOS black box (Run 24, 2026-11-06): why the SoC last reset, read
+ * from the CPM reset status register at probe and then cleared, so every
+ * boot reports only its own reset. /sys/module/ingenic_wdt/parameters/
+ * nebulaos_reset_rsr: bit 0 PR (reset pin), bit 1 WR (watchdog - also how
+ * the platform does every software restart and the panic restart,
+ * soc-x2000/reset.c jz_wdt_restart), bit 2 P0R (power-on). Telling a
+ * watchdog fire from a software restart is left to the boot script, which
+ * uses nebulaos_reset_cppsr: the scratch word jz_wdt_restart sets to
+ * REBOOT_SIGNATURE (0x3535) before every software or panic restart and a
+ * watchdog fire never writes; read, then cleared here. Read-only. */
+static unsigned int nebulaos_reset_rsr;
+module_param(nebulaos_reset_rsr, uint, 0444);
+MODULE_PARM_DESC(nebulaos_reset_rsr, "CPM reset status at boot (read-only)");
+static unsigned int nebulaos_reset_cppsr;
+module_param(nebulaos_reset_cppsr, uint, 0444);
+MODULE_PARM_DESC(nebulaos_reset_cppsr, "CPM CPPSR scratch word at boot (read-only)");
 
 static unsigned int heartbeat = DEFAULT_HEARTBEAT;
 module_param(heartbeat, uint, 0);
@@ -108,6 +128,47 @@ static irqreturn_t ingenic_wdt_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 #endif
+
+/* NebulaOS freeze diagnosis (2026-11-08). The 'H' compare (2/3 of the
+ * timeout: 40 s of the 60 s the feeder arms) is reached only when the
+ * userspace feeder has not fed for 40 s - the printer is frozen or nearly
+ * so. Until now that left no trace: the kernel's own detectors run from
+ * timers and printed nothing in the real mid-print freeze of 2026-11-08.
+ * This is a device interrupt (the TCU line, RTC-clocked), so it still
+ * arrives when every kernel timer is dead, as long as the CPU it is routed
+ * to takes interrupts. It masks itself (one shot, no storm), restarts the
+ * hardware count so the dump has a full timeout to finish, prints the
+ * clockevent state, the blocked tasks and every CPU's backtrace, then
+ * panics: the panic writes the whole kernel log into pstore (the record
+ * zone), past a console lock a frozen CPU might hold. If this never fires
+ * before a watchdog reset, the CPU that owns the line had interrupts off
+ * the whole time - also an answer. */
+extern void nebulaos_core_ost_dump(void);
+
+static irqreturn_t nebulaos_wdt_pretimeout(int irq, void *dev_id)
+{
+	struct ingenic_wdt_drvdata *drvdata = dev_id;
+
+	if (!(readl(drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_RD) & INGENIC_WDT_TIMER_FLAG))
+		return IRQ_NONE;	/* shared TCU line: not ours */
+	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_SET);
+	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
+	/* A software restart (soc-x2000/reset.c jz_wdt_restart) rewrites the
+	 * whole data register with a 4 ms count, which leaves the 'H' compare
+	 * at 0: the flag rises at once. That is a reboot, not a freeze. */
+	if (system_state != SYSTEM_RUNNING)
+		return IRQ_HANDLED;
+	writel(readl(drvdata->base + INGENIC_REG_WDT_TIMER_CONTROL) | INGENIC_WDT_CLOCK_CLRZ,
+	       drvdata->base + INGENIC_REG_WDT_TIMER_CONTROL);
+
+	pr_emerg("nebulaos-freeze: watchdog not fed for %u s (cpu%d, jiffies %lu) - dumping state\n",
+		 drvdata->timeout * 2 / 3, smp_processor_id(), jiffies);
+	nebulaos_core_ost_dump();
+	show_state_filter(TASK_UNINTERRUPTIBLE);
+	trigger_all_cpu_backtrace();
+	panic("nebulaos-freeze: watchdog pre-timeout");
+	return IRQ_HANDLED;
+}
 
 static int ingenic_wdt_ping(struct watchdog_device *wdt_dev)
 {
@@ -341,8 +402,30 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	 */
 	writeb(0x0, drvdata->base + INGENIC_REG_WDT_COUNTER_ENABLE);
 
+#if IRQ_SWITCH
 	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_CLR);
+#else
+	/* NebulaOS black box (Run 24, 2026-11-06): with no handler (IRQ_SWITCH
+	 * 0) the WDT interrupt must stay MASKED. The vendor code unmasked it
+	 * here (MASK_CLR), so 40 s after the last feed (the 'H' compare at
+	 * 2/3 of the timeout) its flag held the shared TCU line asserted and
+	 * irq/35-ingenic-tcu-interrupt ran at 100% for the last ~20 s before
+	 * every watchdog reset - seen on ke-dev in the heartbeat of a
+	 * watchdog-fire test. Never reached while the feeder runs. The reset
+	 * itself does not depend on this interrupt. */
+	writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_SET);
+#endif
 	writel(INGENIC_WDT_TIMER_FLAG, drvdata->base + INGENIC_REG_WDT_TIMER_FLAG_CLR);
+#if !IRQ_SWITCH
+	/* The pre-timeout dump (nebulaos_wdt_pretimeout): it clears and masks
+	 * the flag itself, so unmasking is safe now that a handler exists. */
+	ret = request_irq(drvdata->irq, nebulaos_wdt_pretimeout,
+	                  IRQF_SHARED | IRQF_TRIGGER_LOW, "watchdog-pretimeout", drvdata);
+	if (ret)
+		dev_err(&pdev->dev, "pre-timeout irq %d: %d (no freeze dump)\n", drvdata->irq, ret);
+	else
+		writel(INGENIC_WDT_TIMER_MASK, drvdata->base + INGENIC_REG_WDT_TIMER_MASK_CLR);
+#endif
 #if IRQ_SWITCH
 	ret = request_irq(drvdata->irq, ingenic_wdt_interrupt,
 	                  IRQF_SHARED | IRQF_TRIGGER_LOW, "watchdog-int", drvdata);
@@ -353,6 +436,28 @@ static int ingenic_wdt_probe(struct platform_device *pdev)
 	}
 #endif
 	platform_set_drvdata(pdev, drvdata);
+
+	nebulaos_reset_rsr = cpm_inl(CPM_RSR);
+	nebulaos_reset_cppsr = cpm_inl(CPM_CPPSR);
+	cpm_outl(0, CPM_RSR);
+	/* Clear the reboot signature too (same unlock as jz_wdt_restart), so
+	 * the next boot sees 0x3535 only if THIS boot ended in a software or
+	 * panic restart - a watchdog fire after a freeze never writes it. */
+	cpm_outl(0x5a5a, CPM_CPSPPR);
+	cpm_outl(0, CPM_CPPSR);
+	cpm_outl(0x0, CPM_CPSPPR);
+	pr_info("ingenic_wdt: reset status RSR=0x%08x%s%s%s CPPSR=0x%08x\n",
+		nebulaos_reset_rsr,
+		/* soc-x2000 cpm.h: RSR_PR BIT0 (power-on; 0x1 after switching
+		 * on, proven on ke-dev), RSR_WR BIT1, RSR_P0R BIT2. Every
+		 * software or panic restart also goes through the watchdog
+		 * (jz_wdt_restart) and leaves REBOOT_SIGNATURE 0x3535 in CPPSR;
+		 * only WR without it is a watchdog fire. */
+		(nebulaos_reset_rsr & (1 << 0)) ? " power-on" : "",
+		!(nebulaos_reset_rsr & (1 << 1)) ? "" :
+			nebulaos_reset_cppsr == 0x3535 ? " restart" : " watchdog",
+		(nebulaos_reset_rsr & (1 << 2)) ? " p0-reset" : "",
+		nebulaos_reset_cppsr);
 
 	pr_info("ingenic watchdog probe success\n");
 	return 0;

@@ -113,6 +113,16 @@ struct rte_console {
 #include "debug.h"
 #include "tracepoint.h"
 
+/* NebulaOS (2026-11-08, freeze investigation): the SDIO bus is put to sleep
+ * after idletime watchdog ticks (10 ms each) without traffic; on a 43430 with
+ * save/restore that is a KSO sleep/wake of the chip, thousands of times an
+ * hour on a quiet link. -1 (default) keeps the driver's own idletime (1);
+ * 0 never puts the bus to sleep; N > 0 waits N ticks. Writable at runtime:
+ * /sys/module/brcmfmac/parameters/nebulaos_sdio_idle. */
+static int brcmf_nebulaos_sdio_idle = -1;
+module_param_named(nebulaos_sdio_idle, brcmf_nebulaos_sdio_idle, int, 0644);
+MODULE_PARM_DESC(nebulaos_sdio_idle, "SDIO idle ticks before bus sleep: -1 driver default, 0 never");
+
 #define TXQLEN		2048	/* bulk tx queue length */
 #define TXHI		(TXQLEN - 256)	/* turn on flow control above TXHI */
 #define TXLOW		(TXHI - 256)	/* turn off flow control below TXLOW */
@@ -3489,6 +3499,7 @@ static void brcmf_sdio_sr_init(struct brcmf_sdio *bus)
 	/* set flag */
 	bus->sr_enabled = true;
 	brcmf_dbg(INFO, "SR enabled\n");
+	pr_info("brcmfmac: nebulaos: save/restore enabled - idle bus sleep uses KSO\n");
 }
 
 /* enable KSO bit */
@@ -3729,10 +3740,15 @@ static void brcmf_sdio_bus_watchdog(struct brcmf_sdio *bus)
 	/* On idle timeout clear activity flag and/or turn off clock */
 	if (!bus->dpc_triggered) {
 		rmb();
-		if ((!bus->dpc_running) && (bus->idletime > 0) &&
+		s32 idletime = READ_ONCE(brcmf_nebulaos_sdio_idle);
+
+		if (idletime < 0)
+			idletime = bus->idletime;
+
+		if ((!bus->dpc_running) && (idletime > 0) &&
 		    (bus->clkstate == CLK_AVAIL)) {
 			bus->idlecount++;
-			if (bus->idlecount > bus->idletime) {
+			if (bus->idlecount > idletime) {
 				brcmf_dbg(SDIO, "idle\n");
 				sdio_claim_host(bus->sdiodev->func1);
 #ifdef DEBUG

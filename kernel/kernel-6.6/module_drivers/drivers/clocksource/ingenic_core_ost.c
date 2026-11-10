@@ -38,6 +38,7 @@
 #include <linux/of_irq.h>
 #include <linux/delay.h>
 #include <linux/cpu.h>
+#include <linux/kernel_stat.h>
 #include <linux/delay.h>
 
 #include <dt-bindings/interrupt-controller/mips-irq.h>
@@ -202,16 +203,43 @@ static struct tmr_src g_tmr_src = {
 	}
 };
 
+/* Lockless high/low/high read of the free-running 64-bit global counter. */
+static u64 nebulaos_ost_read_cnt(void __iomem *iobase)
+{
+	u32 hi, lo;
+
+	do {
+		hi = ost_readl(iobase + G_OSTCNTH);
+		lo = ost_readl(iobase + G_OSTCNTL);
+	} while (hi != ost_readl(iobase + G_OSTCNTH));
+	return ((u64)hi << 32) | lo;
+}
+
 static unsigned long long sched_clock(void)
 {
 	struct tmr_src *tmr = &g_tmr_src;
+	unsigned long flags;
+	u64 cycles;
 	if (!tmr->iobase) {
 		return 0LL;
 	}
 	if (!ost_readl(tmr->iobase + G_OSTER)) {
 		return 0LL;
 	}
-	return ((u64)core_clocksource_get_cycles(&tmr->cs)); // * tmr_src.cs.mult) >> tmr_src.cs.shift;
+	/* NebulaOS: printk timestamps come through here. If clocksource_lock
+	 * is held by a frozen CPU, the freeze dump (nebulaos_core_ost_dump via
+	 * the watchdog pre-timeout) would hang on its first line. So never
+	 * wait for the lock here: take it when free (unchanged behaviour),
+	 * otherwise read without it - the high/low/high retry in
+	 * nebulaos_ost_read_cnt() is correct on its own for this free-running,
+	 * read-only counter. */
+	if (raw_spin_trylock_irqsave(&clocksource_lock, flags)) {
+		cycles = nebulaos_ost_read_cnt(tmr->iobase);
+		raw_spin_unlock_irqrestore(&clocksource_lock, flags);
+	} else {
+		cycles = nebulaos_ost_read_cnt(tmr->iobase);
+	}
+	return cycles;
 }
 
 void __init core_clocksource_init(struct core_ost_chip *core_ost, struct tmr_src *tmr)
@@ -448,6 +476,46 @@ void ingenic_percpu_timerevent_deinit(void)
 	percpu_timerevent_deinit(&g_core_ost);
 }
 EXPORT_SYMBOL_GPL(ingenic_percpu_timerevent_deinit);
+
+/* NebulaOS freeze diagnosis (2026-11-08): the raw state of every core's
+ * clockevent and of the global clocksource, for the watchdog pre-timeout
+ * handler (ingenic_wdt.c). No lock is taken - the holder may be the frozen
+ * CPU - and each lock is reported as HELD or free instead: a HELD lock with
+ * nobody running is the signature of a deadlock on it. A line is printed
+ * before the registers of each block are read, so a read that never returns
+ * (a hung bus) shows as the last line. */
+void nebulaos_core_ost_dump(void)
+{
+	struct tmr_src *tmr = &g_tmr_src;
+	int i;
+
+	pr_emerg("nebulaos-ost: clocksource_lock %s, reading global OST\n",
+		 raw_spin_is_locked(&clocksource_lock) ? "HELD" : "free");
+	if (tmr->iobase)
+		pr_emerg("nebulaos-ost: global ER=%x CNT=%08x:%08x\n",
+			 ost_readl(tmr->iobase + G_OSTER),
+			 ost_readl(tmr->iobase + G_OSTCNTH),
+			 ost_readl(tmr->iobase + G_OSTCNTL));
+	for (i = 0; i < NR_CPUS; i++) {
+		struct core_timerevent *t = &timerevent_buf[i];
+		void __iomem *b = t->iobase;
+		unsigned int hw = cpu_ost_map[i].cpu_num;
+		int cpu = cpu_number_map(hw);
+
+		if (!b)
+			continue;
+		pr_emerg("nebulaos-ost: cpu%d lock %s prev_set=%u state=%d next_event=%lld irqs=%u, reading core OST\n",
+			 cpu, raw_spin_is_locked(&t->lock) ? "HELD" : "free",
+			 t->prev_set, (int)t->clkevt.state_use_accessors,
+			 ktime_to_ns(t->clkevt.next_event),
+			 g_core_ost.irq > 0 ? kstat_irqs_cpu(g_core_ost.irq, cpu) : 0);
+		pr_emerg("nebulaos-ost: cpu%d ER=%x FR=%x MR=%x DFR=%08x CNT=%08x\n",
+			 cpu, ost_readl(b + OSTER), ost_readl(b + OSTFR),
+			 ost_readl(b + OSTMR), ost_readl(b + OSTDFR),
+			 ost_readl(b + OSTCNT));
+	}
+}
+EXPORT_SYMBOL_GPL(nebulaos_core_ost_dump);
 
 static void __init core_ost_setup(struct core_ost_chip *core_ost, unsigned long ext_rate)
 {
