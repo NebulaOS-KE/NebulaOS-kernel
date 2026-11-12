@@ -47,9 +47,11 @@ you're actually using.
 
 ## Which parts are NebulaOS?
 
-Most of this repository is a vendor SDK.
-[What NebulaOS changes in this kernel](docs/nebulaos/WHAT_NEBULAOS_CHANGES.md) separates the
-four layers on `openke` - the inherited OpenKE work, five real hardware-bug fixes in the vendor
-board description, NebulaOS's own eight changes and the eleven-commit freeze-diagnosis layer
-(pstore black box, lockup detectors, watchdog pre-timeout dump) - and explains why the firmware
-build no longer applies kernel patches.
+Most of this repository is a vendor SDK. The
+[wiki](https://github.com/NebulaOS-KE/NebulaOS-kernel/wiki) is the developer documentation:
+[What NebulaOS changes](https://github.com/NebulaOS-KE/NebulaOS-kernel/wiki/What-NebulaOS-Changes)
+separates the four layers on `openke` - the inherited OpenKE work, five real hardware-bug fixes
+in the vendor board description, NebulaOS's own eight changes and the eleven-commit
+freeze-diagnosis layer (pstore black box, lockup detectors, watchdog pre-timeout dump) - and
+[Build and integration](https://github.com/NebulaOS-KE/NebulaOS-kernel/wiki/Build-And-Integration)
+explains why the firmware build no longer applies kernel patches.
