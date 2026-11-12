@@ -56,9 +56,13 @@ Worth knowing, because it is the gate a kernel change meets first. At 1.0.2
 
 That last one is the build-reproducibility fix, and it shows how this repository and the
 firmware divide the work: the `-n` flag that stops gzip storing a name and an mtime in the
-compressed kernel is **a commit here**, and the firmware's job is only to verify it did not get
-lost. The firmware's reproducibility record still describes it as a build-time variant script;
-no such script exists at 1.0.2.
+compressed kernel is **a commit here** - `b31be02d9`, one line, `gzip -v9f` to `gzip -nv9f` in
+`arch/mips/boot/zcompressed/Makefile`, an ancestor of the 1.0.2 pin - and the firmware's job is
+only to verify it did not get lost. Without it the compressed kernel carried a name and an
+mtime, which is what kept `xImage` from reproducing; with it, firmware `3bdf3ff` built twice
+gave the same `xImage` byte for byte (the firmware's `docs/REPRODUCIBILITY.md`, corrected
+2026-11-12 in `d464b46` - it previously credited this fix to a build-time variant script that
+does not exist).
 
 It does **not** check which branch the checkout is on. That check existed and was removed: a
 checkout at an exact commit is a detached HEAD, so `git rev-parse --abbrev-ref HEAD` reports the
