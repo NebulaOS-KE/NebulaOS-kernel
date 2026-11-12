@@ -44,3 +44,14 @@ itself is at `kernel/kernel-6.6/COPYING` (GPL-2.0) and `kernel/kernel-6.6/LICENS
 top-level directories have their own license files. GitHub's license detector only looks at the
 repo root, so it'll correctly show "no license detected" here — check the specific subdirectory
 you're actually using.
+
+## Which parts are NebulaOS?
+
+Most of this repository is a vendor SDK. The
+[wiki](https://github.com/NebulaOS-KE/NebulaOS-kernel/wiki) is the developer documentation:
+[What NebulaOS changes](https://github.com/NebulaOS-KE/NebulaOS-kernel/wiki/What-NebulaOS-Changes)
+separates the four layers on `openke` - the inherited OpenKE work, five real hardware-bug fixes
+in the vendor board description, NebulaOS's own eight changes and the eleven-commit
+freeze-diagnosis layer (pstore black box, lockup detectors, watchdog pre-timeout dump) - and
+[Build and integration](https://github.com/NebulaOS-KE/NebulaOS-kernel/wiki/Build-And-Integration)
+explains why the firmware build no longer applies kernel patches.
