@@ -74,6 +74,7 @@ static void __iomem *nfr_base;
 static u32 nfr_ncpu, nfr_nent;
 static DEFINE_PER_CPU(u32, nfr_idx);
 static DEFINE_PER_CPU(u32, nfr_mmio_idx);
+static DEFINE_PER_CPU(int, nfr_busy);	/* inside __nebulaos_fr_log: its clock reads are not noted */
 
 static void *nfr_prev;		/* copy of the previous boot's area, or NULL */
 static size_t nfr_size;
@@ -114,7 +115,9 @@ void __nebulaos_fr_log(unsigned int type, unsigned int arg,
 	__raw_writel((u32)a, &r->a);
 	__raw_writel((u32)b, &r->b);
 	__raw_writel((type & 0xffff) | ((arg & 0xffff) << 16), &r->type);
+	__this_cpu_write(nfr_busy, 1);
 	__raw_writel((u32)(sched_clock() >> 10), &r->ts);
+	__this_cpu_write(nfr_busy, 0);
 	idx++;
 	__this_cpu_write(nfr_idx, idx);
 	__raw_writel(idx, &((struct nfr_hdr __iomem *)nfr_base)->idx[cpu]);
@@ -133,9 +136,14 @@ void __nebulaos_fr_mmio(unsigned long addr, unsigned int write, unsigned long ip
 	int cpu;
 	u32 i;
 
+	/* Reads of the free-running OST counter (sched_clock, clocksource:
+	 * 0x120000xx, tens of thousands per second) would flush every device
+	 * access out of the 16-entry ring; they are not noted. */
+	if (!write && (addr & 0xffffff00UL) == 0xb2000000UL)
+		return;
 	local_irq_save(flags);
 	cpu = raw_smp_processor_id();
-	if (likely(cpu < nfr_ncpu)) {
+	if (likely(cpu < nfr_ncpu) && !__this_cpu_read(nfr_busy)) {
 		i = __this_cpu_read(nfr_mmio_idx);
 		e = nfr_base + NFR_MMIO_OFF + cpu * NFR_MMIO_STRIDE;
 		__raw_writel((u32)addr, e + 2 + (i % NFR_MMIO_N) * 2);
@@ -290,7 +298,7 @@ static int nfr_live_show(struct seq_file *m, void *v)
 
 static int nfr_live_open(struct inode *inode, struct file *file)
 {
-	return single_open_size(file, nfr_live_show, NULL, 4 << 20);
+	return single_open_size(file, nfr_live_show, NULL, 6 << 20);
 }
 
 static ssize_t nfr_live_write(struct file *file, const char __user *buf,
@@ -307,7 +315,7 @@ static ssize_t nfr_live_write(struct file *file, const char __user *buf,
 
 static int nfr_prev_open(struct inode *inode, struct file *file)
 {
-	return single_open_size(file, nfr_prev_show, NULL, 4 << 20);
+	return single_open_size(file, nfr_prev_show, NULL, 6 << 20);
 }
 
 static const struct proc_ops nfr_live_ops = {
