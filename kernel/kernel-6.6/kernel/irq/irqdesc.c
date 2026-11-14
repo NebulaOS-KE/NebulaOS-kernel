@@ -15,6 +15,14 @@
 #include <linux/maple_tree.h>
 #include <linux/irqdomain.h>
 #include <linux/sysfs.h>
+#include <linux/nebulaos_flightrec.h>
+#include <asm/irq_regs.h>
+
+#ifdef CONFIG_MIPS
+#define nfr_irq_ra(regs) ((regs)->regs[31])
+#else
+#define nfr_irq_ra(regs) 0UL
+#endif
 
 #include "internals.h"
 
@@ -673,6 +681,18 @@ int handle_irq_desc(struct irq_desc *desc)
 	if (WARN_ON_ONCE(!in_hardirq() && handle_enforce_irqctx(data)))
 		return -EPERM;
 
+#ifdef CONFIG_NEBULAOS_FLIGHTREC
+	if (READ_ONCE(nebulaos_fr_enabled)) {
+		struct pt_regs *regs = get_irq_regs();
+		unsigned int irq = irq_desc_get_irq(desc);
+
+		__nebulaos_fr_log(NFR_IRQ_IN, irq, regs ? instruction_pointer(regs) : 0,
+				  regs ? nfr_irq_ra(regs) : 0);
+		generic_handle_irq_desc(desc);
+		__nebulaos_fr_log(NFR_IRQ_OUT, irq, 0, 0);
+		return 0;
+	}
+#endif
 	generic_handle_irq_desc(desc);
 	return 0;
 }

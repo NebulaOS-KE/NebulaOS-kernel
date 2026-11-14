@@ -53,6 +53,7 @@
 #include <linux/nmi.h>
 #include <linux/kvm_para.h>
 #include <linux/delay.h>
+#include <linux/nebulaos_flightrec.h>
 
 #include "workqueue_internal.h"
 
@@ -2654,7 +2655,9 @@ __acquires(&pool->lock)
 	 */
 	lockdep_invariant_state(true);
 	trace_workqueue_execute_start(work);
+	nebulaos_fr_log(NFR_WQ_IN, 0, (unsigned long)worker->current_func, (unsigned long)work);
 	worker->current_func(work);
+	nebulaos_fr_log(NFR_WQ_OUT, 0, (unsigned long)worker->current_func, 0);
 	/*
 	 * While we must be careful to not use "work" after this, the trace
 	 * point will only record its address.

@@ -27,6 +27,7 @@
 #include <linux/tick.h>
 #include <linux/irq.h>
 #include <linux/wait_bit.h>
+#include <linux/nebulaos_flightrec.h>
 
 #include <asm/softirq_stack.h>
 
@@ -588,7 +589,9 @@ restart:
 		kstat_incr_softirqs_this_cpu(vec_nr);
 
 		trace_softirq_entry(vec_nr);
+		nebulaos_fr_log(NFR_SIRQ_IN, vec_nr, (unsigned long)h->action, 0);
 		h->action(h);
+		nebulaos_fr_log(NFR_SIRQ_OUT, vec_nr, 0, 0);
 		trace_softirq_exit(vec_nr);
 		if (unlikely(prev_count != preempt_count())) {
 			pr_err("huh, entered softirq %u %s %p with preempt_count %08x, exited with %08x?\n",

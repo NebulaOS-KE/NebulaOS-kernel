@@ -19,6 +19,7 @@
 #include <linux/sched/rt.h>
 #include <linux/sched/task.h>
 #include <linux/sched/isolation.h>
+#include <linux/nebulaos_flightrec.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/task_work.h>
 
@@ -1193,7 +1194,9 @@ irq_forced_thread_fn(struct irq_desc *desc, struct irqaction *action)
 	local_bh_disable();
 	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
 		local_irq_disable();
+	nebulaos_fr_log(NFR_THR_IN, action->irq, (unsigned long)action->thread_fn, 0);
 	ret = action->thread_fn(action->irq, action->dev_id);
+	nebulaos_fr_log(NFR_THR_OUT, action->irq, 0, 0);
 	if (ret == IRQ_HANDLED)
 		atomic_inc(&desc->threads_handled);
 
@@ -1214,7 +1217,9 @@ static irqreturn_t irq_thread_fn(struct irq_desc *desc,
 {
 	irqreturn_t ret;
 
+	nebulaos_fr_log(NFR_THR_IN, action->irq, (unsigned long)action->thread_fn, 0);
 	ret = action->thread_fn(action->irq, action->dev_id);
+	nebulaos_fr_log(NFR_THR_OUT, action->irq, 0, 0);
 	if (ret == IRQ_HANDLED)
 		atomic_inc(&desc->threads_handled);
 

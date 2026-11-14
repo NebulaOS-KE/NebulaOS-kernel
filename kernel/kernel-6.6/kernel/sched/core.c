@@ -7,6 +7,7 @@
  *  Copyright (C) 1991-2002  Linus Torvalds
  */
 #include <linux/highmem.h>
+#include <linux/nebulaos_flightrec.h>
 #include <linux/hrtimer_api.h>
 #include <linux/ktime_api.h>
 #include <linux/sched/signal.h>
@@ -6718,6 +6719,14 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 		trace_sched_switch(sched_mode & SM_MASK_PREEMPT, prev, next, prev_state);
 
 		/* Also unlocks the rq: */
+#ifdef CONFIG_NEBULAOS_FLIGHTREC
+		if (READ_ONCE(nebulaos_fr_enabled)) {
+			u32 c4;
+
+			memcpy(&c4, next->comm, sizeof(c4));
+			__nebulaos_fr_log(NFR_SWITCH, prev->pid, next->pid, c4);
+		}
+#endif
 		rq = context_switch(rq, prev, next, &rf);
 	} else {
 		rq_unpin_lock(rq, &rf);

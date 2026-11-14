@@ -78,6 +78,18 @@
 			ecc-size = <16>;
 			mem-type = <1>;			/* unbuffered: no write lost at a hard reset */
 		};
+
+		/* NebulaOS flight recorder (2026-11-14): per-CPU ring of the last
+		 * kernel events (IRQ, softirq, timer, workqueue, context switch),
+		 * written uncached so a watchdog reset keeps it; read after the
+		 * next boot at /proc/nebulaos_flightrec_prev. Next to ramoops, in
+		 * the same bootloader-untouched part of the disabled ISP pool.
+		 * 4 KB header + 2 CPUs x 8192 x 16 bytes. */
+		nebulaos_flightrec: flightrec@e100000 {
+			compatible = "nebulaos,flightrec";
+			reg = <0x0e100000 0x41000>;
+			no-map;
+		};
 	};
 
 		  cam_avdd: cam_regulator_avdd {

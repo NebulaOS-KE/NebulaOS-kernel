@@ -47,6 +47,7 @@
 #include <linux/sysctl.h>
 
 #include <linux/uaccess.h>
+#include <linux/nebulaos_flightrec.h>
 #include <asm/unistd.h>
 #include <asm/div64.h>
 #include <asm/timex.h>
@@ -1705,7 +1706,9 @@ static void call_timer_fn(struct timer_list *timer,
 	lock_map_acquire(&lockdep_map);
 
 	trace_timer_expire_entry(timer, baseclk);
+	nebulaos_fr_log(NFR_TMR_IN, 0, (unsigned long)fn, 0);
 	fn(timer);
+	nebulaos_fr_log(NFR_TMR_OUT, 0, (unsigned long)fn, 0);
 	trace_timer_expire_exit(timer);
 
 	lock_map_release(&lockdep_map);

@@ -137,6 +137,18 @@ config GENERIC_IRQ_DEBUGFS
 
 	  If you don't know what to do here, say N.
 
+config NEBULAOS_FLIGHTREC
+	bool "NebulaOS flight recorder (per-CPU event ring in reserved RAM)"
+	depends on OF_ADDRESS && PROC_FS
+	default n
+	help
+	  NebulaOS: records hard IRQ, threaded IRQ, softirq, timer callback,
+	  workqueue item and context-switch events per CPU, uncached, in the
+	  "nebulaos,flightrec" no-map reserved-memory area, so the last events
+	  before a watchdog reset can be read after the next boot from
+	  /proc/nebulaos_flightrec_prev. For hard freezes that leave no other
+	  trace. Off at boot with nebulaos_flightrec=0.
+
 config NEBULAOS_IRQ_THREAD_PRIO
 	string "SCHED_FIFO priorities of IRQ threads, by action name"
 	depends on IRQ_FORCED_THREADING
