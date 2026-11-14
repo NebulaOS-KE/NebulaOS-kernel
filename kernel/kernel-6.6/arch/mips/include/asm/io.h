@@ -215,7 +215,24 @@ void iounmap(const volatile void __iomem *addr);
 #define war_io_reorder_wmb()		barrier()
 #endif
 
-#define __BUILD_MEMORY_SINGLE(pfx, bwlq, type, barrier, relax, irq)	\
+/*
+ * NebulaOS flight recorder (2026-11-14): readX/writeX and the _relaxed
+ * variants note the address and the calling code location in a small
+ * per-CPU ring that survives a watchdog reset, BEFORE the access - so a CPU
+ * stalled on a device register names that register. __raw_X is not traced
+ * (the recorder itself writes with it).
+ */
+#ifdef CONFIG_NEBULAOS_FLIGHTREC
+extern int nebulaos_fr_enabled;
+extern void __nebulaos_fr_mmio(unsigned long addr, unsigned int write, unsigned long ip);
+#define nebulaos_fr_mmio(addr, write, ip)					\
+	do { if (unlikely(READ_ONCE(nebulaos_fr_enabled)))			\
+		__nebulaos_fr_mmio(addr, write, ip); } while (0)
+#else
+#define nebulaos_fr_mmio(addr, write, ip) do { } while (0)
+#endif
+
+#define __BUILD_MEMORY_SINGLE(pfx, bwlq, type, barrier, relax, irq, trace)	\
 									\
 static inline void pfx##write##bwlq(type val,				\
 				    volatile void __iomem *mem)		\
@@ -232,6 +249,8 @@ static inline void pfx##write##bwlq(type val,				\
 									\
 	__val = pfx##ioswab##bwlq(__mem, val);				\
 									\
+	if (trace)							\
+		nebulaos_fr_mmio((unsigned long)__mem, 1, _THIS_IP_);	\
 	if (sizeof(type) != sizeof(u64) || sizeof(u64) == sizeof(long)) \
 		*__mem = __val;						\
 	else if (cpu_has_64bits) {					\
@@ -267,6 +286,8 @@ static inline type pfx##read##bwlq(const volatile void __iomem *mem)	\
 	if (barrier)							\
 		iobarrier_rw();						\
 									\
+	if (trace)							\
+		nebulaos_fr_mmio((unsigned long)__mem, 0, _THIS_IP_);	\
 	if (sizeof(type) != sizeof(u64) || sizeof(u64) == sizeof(long)) \
 		__val = *__mem;						\
 	else if (cpu_has_64bits) {					\
@@ -338,16 +359,16 @@ static inline type pfx##in##bwlq##p(unsigned long port)			\
 	return pfx##ioswab##bwlq(__addr, __val);			\
 }
 
-#define __BUILD_MEMORY_PFX(bus, bwlq, type, relax)			\
+#define __BUILD_MEMORY_PFX(bus, bwlq, type, relax, trace)		\
 									\
-__BUILD_MEMORY_SINGLE(bus, bwlq, type, 1, relax, 1)
+__BUILD_MEMORY_SINGLE(bus, bwlq, type, 1, relax, 1, trace)
 
 #define BUILDIO_MEM(bwlq, type)						\
 									\
-__BUILD_MEMORY_PFX(__raw_, bwlq, type, 0)				\
-__BUILD_MEMORY_PFX(__relaxed_, bwlq, type, 1)				\
-__BUILD_MEMORY_PFX(__mem_, bwlq, type, 0)				\
-__BUILD_MEMORY_PFX(, bwlq, type, 0)
+__BUILD_MEMORY_PFX(__raw_, bwlq, type, 0, 0)				\
+__BUILD_MEMORY_PFX(__relaxed_, bwlq, type, 1, 1)			\
+__BUILD_MEMORY_PFX(__mem_, bwlq, type, 0, 0)				\
+__BUILD_MEMORY_PFX(, bwlq, type, 0, 1)
 
 BUILDIO_MEM(b, u8)
 BUILDIO_MEM(w, u16)
@@ -355,8 +376,8 @@ BUILDIO_MEM(l, u32)
 #ifdef CONFIG_64BIT
 BUILDIO_MEM(q, u64)
 #else
-__BUILD_MEMORY_PFX(__raw_, q, u64, 0)
-__BUILD_MEMORY_PFX(__mem_, q, u64, 0)
+__BUILD_MEMORY_PFX(__raw_, q, u64, 0, 0)
+__BUILD_MEMORY_PFX(__mem_, q, u64, 0, 0)
 #endif
 
 #define __BUILD_IOPORT_PFX(bus, bwlq, type)				\
@@ -376,7 +397,7 @@ BUILDIO_IOPORT(q, u64)
 
 #define __BUILDIO(bwlq, type)						\
 									\
-__BUILD_MEMORY_SINGLE(____raw_, bwlq, type, 1, 0, 0)
+__BUILD_MEMORY_SINGLE(____raw_, bwlq, type, 1, 0, 0, 0)
 
 __BUILDIO(q, u64)
 

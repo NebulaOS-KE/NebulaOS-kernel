@@ -38,9 +38,15 @@
 #include <linux/vmalloc.h>
 
 #define NFR_MAGIC	0x4e465231	/* "NFR1" */
-#define NFR_VERSION	1
+#define NFR_VERSION	2
 #define NFR_HDR_SIZE	4096
 #define NFR_MAX_CPUS	8
+/* Last device-register accesses per CPU (readX/writeX, asm/io.h), in the
+ * header page: at NFR_MMIO_OFF + cpu * NFR_MMIO_STRIDE a u32 count, a pad
+ * word, then NFR_MMIO_N entries of {address, code address | 1 for a write}. */
+#define NFR_MMIO_OFF	0x100
+#define NFR_MMIO_N	16
+#define NFR_MMIO_STRIDE	(8 + NFR_MMIO_N * 8)
 
 struct nfr_hdr {
 	u32 magic;
@@ -67,6 +73,7 @@ EXPORT_SYMBOL_GPL(nebulaos_fr_enabled);
 static void __iomem *nfr_base;
 static u32 nfr_ncpu, nfr_nent;
 static DEFINE_PER_CPU(u32, nfr_idx);
+static DEFINE_PER_CPU(u32, nfr_mmio_idx);
 
 static void *nfr_prev;		/* copy of the previous boot's area, or NULL */
 static size_t nfr_size;
@@ -115,6 +122,31 @@ out:
 	local_irq_restore(flags);
 }
 EXPORT_SYMBOL_GPL(__nebulaos_fr_log);
+
+/* Called from readX/writeX BEFORE the access (asm/io.h). The barrier makes
+ * the note reach DRAM before the device access is issued, so a CPU stalled
+ * on that access has already recorded it. */
+void __nebulaos_fr_mmio(unsigned long addr, unsigned int write, unsigned long ip)
+{
+	u32 __iomem *e;
+	unsigned long flags;
+	int cpu;
+	u32 i;
+
+	local_irq_save(flags);
+	cpu = raw_smp_processor_id();
+	if (likely(cpu < nfr_ncpu)) {
+		i = __this_cpu_read(nfr_mmio_idx);
+		e = nfr_base + NFR_MMIO_OFF + cpu * NFR_MMIO_STRIDE;
+		__raw_writel((u32)addr, e + 2 + (i % NFR_MMIO_N) * 2);
+		__raw_writel((u32)ip | (write ? 1 : 0), e + 3 + (i % NFR_MMIO_N) * 2);
+		__this_cpu_write(nfr_mmio_idx, i + 1);
+		__raw_writel(i + 1, e);
+		mb();
+	}
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL(__nebulaos_fr_mmio);
 
 /* ---- decoding ----------------------------------------------------------- */
 
@@ -208,6 +240,23 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 			default:
 				break;
 			}
+			seq_putc(m, '\n');
+		}
+	}
+
+	for (cpu = 0; cpu < h->ncpu; cpu++) {
+		const u32 *e = area + NFR_MMIO_OFF + cpu * NFR_MMIO_STRIDE;
+		u32 end = e[0], n = min_t(u32, end, NFR_MMIO_N), i;
+
+		seq_printf(m, "== cpu%d: last %u of %u device register accesses (oldest first; the last one may never have completed)\n",
+			   cpu, n, end);
+		for (i = end - n; i != end; i++) {
+			u32 a = e[2 + (i % NFR_MMIO_N) * 2], ip = e[3 + (i % NFR_MMIO_N) * 2];
+
+			seq_printf(m, "cpu%d MMIO %c 0x%08x", cpu, (ip & 1) ? 'W' : 'R', a);
+			if (a >= 0xa0000000u && a < 0xc0000000u)
+				seq_printf(m, " phys=0x%08x", a & 0x1fffffffu);
+			nfr_addr(m, ip & ~1u, sym);
 			seq_putc(m, '\n');
 		}
 	}
