@@ -48,6 +48,11 @@ static void mips_sc_inv(unsigned long addr, unsigned long size)
 	unsigned long lsize = cpu_scache_line_size();
 	unsigned long almask = ~(lsize - 1);
 
+	/* NebulaOS 2026-11-15: complete every earlier load/store before the L2
+	 * lines are invalidated, as mips_sc_wback_inv() already does. Without
+	 * it a store still in flight can land in a line after its invalidate,
+	 * and the CPU later reads that stale line instead of the DMA data. */
+	__sync();
 	if (size >= scache_size) {
 		if (lsize == 64) {
 			blast_scache64();
