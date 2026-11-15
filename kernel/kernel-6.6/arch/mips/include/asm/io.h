@@ -223,10 +223,10 @@ void iounmap(const volatile void __iomem *addr);
  * (the recorder itself writes with it).
  */
 #ifdef CONFIG_NEBULAOS_FLIGHTREC
-extern int nebulaos_fr_enabled;
+extern int nebulaos_fr_mmio_enabled;
 extern void __nebulaos_fr_mmio(unsigned long addr, unsigned int write, unsigned long ip);
 #define nebulaos_fr_mmio(addr, write, ip)					\
-	do { if (unlikely(READ_ONCE(nebulaos_fr_enabled)))			\
+	do { if (unlikely(READ_ONCE(nebulaos_fr_mmio_enabled)))		\
 		__nebulaos_fr_mmio(addr, write, ip); } while (0)
 #else
 #define nebulaos_fr_mmio(addr, write, ip) do { } while (0)

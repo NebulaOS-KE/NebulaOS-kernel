@@ -17,6 +17,12 @@
  * area is reset and recording starts. /proc/nebulaos_flightrec shows the
  * live rings; writing a number to it logs a MARK record.
  *
+ * The device-register log (readX/writeX, with a full barrier per access) can
+ * be switched at run time: write "mmio=0" or "mmio=1" to
+ * /proc/nebulaos_flightrec (logged as a CTL record), or boot with
+ * nebulaos_flightrec_mmio=0. Default on. The header keeps the current state,
+ * so a recording from a frozen boot says whether the register log was on.
+ *
  * Cost: one irq-save section and five uncached stores per event.
  */
 #include <linux/crc32.h>
@@ -55,7 +61,8 @@ struct nfr_hdr {
 	u32 nent;		/* entries per CPU, power of two */
 	u32 banner_crc;
 	u32 boot_ts;		/* sched_clock() >> 10 when recording started */
-	u32 reserved[2];
+	u32 mmio_on;		/* device-register log on (1) or off (0) */
+	u32 reserved;
 	u32 idx[NFR_MAX_CPUS];	/* next slot per CPU (monotonic, masked on use) */
 };
 
@@ -69,6 +76,9 @@ struct nfr_rec {
 
 int nebulaos_fr_enabled __read_mostly;
 EXPORT_SYMBOL_GPL(nebulaos_fr_enabled);
+/* asm/io.h notes device-register accesses only while this is set. */
+int nebulaos_fr_mmio_enabled __read_mostly;
+EXPORT_SYMBOL(nebulaos_fr_mmio_enabled);
 
 static void __iomem *nfr_base;
 static u32 nfr_ncpu, nfr_nent;
@@ -79,6 +89,7 @@ static DEFINE_PER_CPU(int, nfr_busy);	/* inside __nebulaos_fr_log: its clock rea
 static void *nfr_prev;		/* copy of the previous boot's area, or NULL */
 static size_t nfr_size;
 static bool nfr_param_off;
+static bool nfr_mmio_param_off;
 
 static int __init nfr_param(char *s)
 {
@@ -86,6 +97,13 @@ static int __init nfr_param(char *s)
 	return 1;
 }
 __setup("nebulaos_flightrec=", nfr_param);
+
+static int __init nfr_mmio_param(char *s)
+{
+	nfr_mmio_param_off = s && (s[0] == '0' || s[0] == 'n' || s[0] == 'N');
+	return 1;
+}
+__setup("nebulaos_flightrec_mmio=", nfr_mmio_param);
 
 static u32 nfr_banner_crc(void)
 {
@@ -164,7 +182,7 @@ static const char *const nfr_names[NFR_NR_TYPES] = {
 	[NFR_SIRQ_IN] = "SIRQ>", [NFR_SIRQ_OUT] = "SIRQ<",
 	[NFR_TMR_IN] = "TMR>", [NFR_TMR_OUT] = "TMR<",
 	[NFR_WQ_IN] = "WQ>", [NFR_WQ_OUT] = "WQ<",
-	[NFR_SWITCH] = "SW", [NFR_MARK] = "MARK",
+	[NFR_SWITCH] = "SW", [NFR_MARK] = "MARK", [NFR_CTL] = "CTL",
 };
 
 /* A text address is printed as a symbol only when the image that wrote it is
@@ -193,8 +211,9 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 		return;
 	}
 	sym = h->banner_crc == nfr_banner_crc();
-	seq_printf(m, "%s: ncpu=%u entries/cpu=%u symbols=%s\n", what, h->ncpu,
-		   h->nent, sym ? "this kernel" : "OTHER kernel (raw addresses)");
+	seq_printf(m, "%s: ncpu=%u entries/cpu=%u symbols=%s register-log=%s\n", what,
+		   h->ncpu, h->nent, sym ? "this kernel" : "OTHER kernel (raw addresses)",
+		   h->mmio_on ? "on" : "off");
 	seq_puts(m, "ts in units of 1.024 us; dt = time before the newest record (ms)\n");
 
 	for (cpu = 0; cpu < h->ncpu; cpu++) {
@@ -237,6 +256,9 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 			case NFR_WQ_IN:
 				nfr_addr(m, r->a, sym);
 				seq_printf(m, " work=0x%08x", r->b);
+				break;
+			case NFR_CTL:
+				seq_printf(m, " register-log=%s", r->arg ? "on" : "off");
 				break;
 			case NFR_SWITCH: {
 				char c[5];
@@ -301,12 +323,33 @@ static int nfr_live_open(struct inode *inode, struct file *file)
 	return single_open_size(file, nfr_live_show, NULL, 6 << 20);
 }
 
+static void nfr_set_mmio(unsigned int on)
+{
+	WRITE_ONCE(nebulaos_fr_mmio_enabled, on);
+	__raw_writel(on, &((struct nfr_hdr __iomem *)nfr_base)->mmio_on);
+	nebulaos_fr_log(NFR_CTL, on, 0, 0);
+	pr_info("nebulaos-flightrec: register log %s\n", on ? "on" : "off");
+}
+
 static ssize_t nfr_live_write(struct file *file, const char __user *buf,
 			      size_t count, loff_t *ppos)
 {
+	char k[16];
+	size_t n = min(count, sizeof(k) - 1);
 	unsigned int v;
-	int ret = kstrtouint_from_user(buf, count, 0, &v);
+	int ret;
 
+	if (copy_from_user(k, buf, n))
+		return -EFAULT;
+	k[n] = 0;
+	if (!strncmp(k, "mmio=", 5)) {
+		ret = kstrtouint(strim(k + 5), 0, &v);
+		if (ret || v > 1)
+			return -EINVAL;
+		nfr_set_mmio(v);
+		return count;
+	}
+	ret = kstrtouint_from_user(buf, count, 0, &v);
 	if (ret)
 		return ret;
 	nebulaos_fr_log(NFR_MARK, v, 0, 0);
@@ -397,8 +440,11 @@ static int __init nfr_init(void)
 	proc_create("nebulaos_flightrec", 0600, NULL, &nfr_live_ops);
 	smp_wmb();
 	WRITE_ONCE(nebulaos_fr_enabled, 1);
-	pr_info("nebulaos-flightrec: recording at %pa, %u cpus x %u events; previous boot %s\n",
-		&res.start, ncpu, nent, nfr_prev ? "saved" : "had no recording");
+	__raw_writel(!nfr_mmio_param_off, &h->mmio_on);
+	WRITE_ONCE(nebulaos_fr_mmio_enabled, !nfr_mmio_param_off);
+	pr_info("nebulaos-flightrec: recording at %pa, %u cpus x %u events, register log %s; previous boot %s\n",
+		&res.start, ncpu, nent, nfr_mmio_param_off ? "off" : "on",
+		nfr_prev ? "saved" : "had no recording");
 	return 0;
 }
 early_initcall(nfr_init);

@@ -27,6 +27,7 @@ enum nfr_type {
 	NFR_WQ_OUT,	/* a = work fn */
 	NFR_SWITCH,	/* arg = prev pid (low 16), a = next pid, b = next comm[0..3] */
 	NFR_MARK,	/* arg = user value; written by /proc/nebulaos_flightrec */
+	NFR_CTL,	/* arg = register log now on (1) / off (0) */
 	NFR_NR_TYPES
 };
 
