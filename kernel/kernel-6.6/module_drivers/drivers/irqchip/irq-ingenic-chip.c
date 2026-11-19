@@ -424,6 +424,31 @@ asmlinkage void plat_irq_dispatch(void)
 	}
 }
 
+/*
+ * NebulaOS (2026-11-19, freeze investigation): the vendor migration below
+ * moves a pending interrupt to the other CPU's INTC whenever that CPU is not
+ * busy in an interrupt, writing the other CPU's mask registers while it may
+ * be using them. Off by default in this build: every interrupt then stays on
+ * the INTC it was set up on (CPU 0, or wherever smp_affinity puts it).
+ * nebulaos_irq_migration=1 on the kernel command line restores it.
+ */
+static bool nebulaos_irq_migration;
+
+static int __init nebulaos_irq_migration_param(char *s)
+{
+	nebulaos_irq_migration = s && (s[0] == '1' || s[0] == 'y' || s[0] == 'Y');
+	return 1;
+}
+__setup("nebulaos_irq_migration=", nebulaos_irq_migration_param);
+
+static int __init nebulaos_irq_migration_report(void)
+{
+	pr_info("ingenic-intc: interrupt migration between CPUs %s\n",
+		nebulaos_irq_migration ? "on (nebulaos_irq_migration=1)" : "off");
+	return 0;
+}
+late_initcall(nebulaos_irq_migration_report);
+
 void ingenic_irq_migration(int lock)
 {
 	struct core_irq_chips *irq_chips = &g_irq_chips;
@@ -434,6 +459,9 @@ void ingenic_irq_migration(int lock)
 	int i;
 	struct cpumask resp_mask;
 	unsigned int ipr = 0;
+
+	if (!nebulaos_irq_migration)
+		return;
 
 	if (lock) {
 		irq_lock(chip);

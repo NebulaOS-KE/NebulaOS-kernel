@@ -84,10 +84,11 @@
 		 * written uncached so a watchdog reset keeps it; read after the
 		 * next boot at /proc/nebulaos_flightrec_prev. Next to ramoops, in
 		 * the same bootloader-untouched part of the disabled ISP pool.
-		 * 4 KB header + 2 CPUs x 32768 x 16 bytes. */
+		 * 4 KB header + 2 CPUs x 2048 x 16 bytes register log (v3,
+		 * 2026-11-19) + 2 CPUs x 32768 x 16 bytes events. */
 		nebulaos_flightrec: flightrec@e100000 {
 			compatible = "nebulaos,flightrec";
-			reg = <0x0e100000 0x101000>;
+			reg = <0x0e100000 0x111000>;
 			no-map;
 		};
 	};

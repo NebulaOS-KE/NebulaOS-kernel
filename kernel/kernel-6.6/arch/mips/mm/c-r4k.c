@@ -7,6 +7,7 @@
  * Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002 Ralf Baechle (ralf@gnu.org)
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
+#include <linux/nebulaos_flightrec.h>
 #include <linux/cpu_pm.h>
 #include <linux/hardirq.h>
 #include <linux/init.h>
@@ -747,7 +748,7 @@ static void r4k_flush_icache_user_range(unsigned long start, unsigned long end)
 
 #ifdef CONFIG_DMA_NONCOHERENT
 
-static void r4k_dma_cache_wback_inv(unsigned long addr, unsigned long size)
+static void __r4k_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 {
 	/* Catch bad driver code */
 	if (WARN_ON(size == 0))
@@ -817,7 +818,7 @@ static void prefetch_cache_inv(unsigned long addr, unsigned long size)
 		protected_writeback_scache_line(addr0);
 }
 
-static void r4k_dma_cache_inv(unsigned long addr, unsigned long size)
+static void __r4k_dma_cache_inv(unsigned long addr, unsigned long size)
 {
 	/* Catch bad driver code */
 	if (WARN_ON(size == 0))
@@ -877,6 +878,23 @@ static void r4k_dma_cache_inv(unsigned long addr, unsigned long size)
 	bc_inv(addr, size);
 	__sync();
 }
+/* NebulaOS flight recorder (2026-11-19): every DMA cache maintenance op is
+ * logged on entry (op, address, size) and exit, so a freeze inside one -
+ * or right after one - shows in the recording. */
+static void r4k_dma_cache_wback_inv(unsigned long addr, unsigned long size)
+{
+	nebulaos_fr_log(NFR_DMAC_IN, NFR_DMAC_WBACK_INV, addr, size);
+	__r4k_dma_cache_wback_inv(addr, size);
+	nebulaos_fr_log(NFR_DMAC_OUT, NFR_DMAC_WBACK_INV, 0, 0);
+}
+
+static void r4k_dma_cache_inv(unsigned long addr, unsigned long size)
+{
+	nebulaos_fr_log(NFR_DMAC_IN, NFR_DMAC_INV, addr, size);
+	__r4k_dma_cache_inv(addr, size);
+	nebulaos_fr_log(NFR_DMAC_OUT, NFR_DMAC_INV, 0, 0);
+}
+
 #endif /* CONFIG_DMA_NONCOHERENT */
 
 static void r4k_flush_icache_all(void)

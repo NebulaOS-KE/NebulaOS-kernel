@@ -11,6 +11,7 @@
 #ifndef _LINUX_NEBULAOS_FLIGHTREC_H
 #define _LINUX_NEBULAOS_FLIGHTREC_H
 
+#include <linux/compiler.h>
 #include <linux/types.h>
 
 enum nfr_type {
@@ -28,7 +29,15 @@ enum nfr_type {
 	NFR_SWITCH,	/* arg = prev pid (low 16), a = next pid, b = next comm[0..3] */
 	NFR_MARK,	/* arg = user value; written by /proc/nebulaos_flightrec */
 	NFR_CTL,	/* arg = register log now on (1) / off (0) */
+	NFR_DMAC_IN,	/* arg = op (enum nfr_dmac_op), a = address, b = size */
+	NFR_DMAC_OUT,	/* arg = op */
 	NFR_NR_TYPES
+};
+
+/* DMA cache maintenance ops (arch/mips/mm/c-r4k.c), logged around the op. */
+enum nfr_dmac_op {
+	NFR_DMAC_WBACK_INV = 1,
+	NFR_DMAC_INV = 2,
 };
 
 #ifdef CONFIG_NEBULAOS_FLIGHTREC

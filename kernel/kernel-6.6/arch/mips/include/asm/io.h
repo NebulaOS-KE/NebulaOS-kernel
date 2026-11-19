@@ -216,20 +216,31 @@ void iounmap(const volatile void __iomem *addr);
 #endif
 
 /*
- * NebulaOS flight recorder (2026-11-14): readX/writeX and the _relaxed
- * variants note the address and the calling code location in a small
- * per-CPU ring that survives a watchdog reset, BEFORE the access - so a CPU
- * stalled on a device register names that register. __raw_X is not traced
- * (the recorder itself writes with it).
+ * NebulaOS flight recorder (2026-11-14, v3 2026-11-19): readX/writeX and the
+ * _relaxed variants note the address, the calling code location and (for a
+ * write) the value in a per-CPU ring that survives a watchdog reset, BEFORE
+ * the access - so a CPU stalled on a device register names that register -
+ * and mark the entry done AFTER it, with the value read for a read. An entry
+ * without the done mark is an access that never completed.
+ * __raw_X is not traced (the recorder itself writes with it).
  */
 #ifdef CONFIG_NEBULAOS_FLIGHTREC
 extern int nebulaos_fr_mmio_enabled;
-extern void __nebulaos_fr_mmio(unsigned long addr, unsigned int write, unsigned long ip);
-#define nebulaos_fr_mmio(addr, write, ip)					\
-	do { if (unlikely(READ_ONCE(nebulaos_fr_mmio_enabled)))		\
-		__nebulaos_fr_mmio(addr, write, ip); } while (0)
+extern u32 *__nebulaos_fr_mmio(unsigned long addr, unsigned int write,
+			       unsigned long val, unsigned long ip);
+#define nebulaos_fr_mmio(addr, write, val, ip)				\
+	(unlikely(READ_ONCE(nebulaos_fr_mmio_enabled)) ?		\
+	 __nebulaos_fr_mmio(addr, write, val, ip) : (u32 *)NULL)
+/* Entry words: [0] event index, [1] address, [2] code address | 1 write |
+ * 2 done, [3] value. Plain uncached stores: not traced themselves. */
+#define nebulaos_fr_mmio_done(e, val, ipw)				\
+	do { if (unlikely(e)) {						\
+		((volatile u32 *)(e))[3] = (u32)(val);			\
+		((volatile u32 *)(e))[2] = (u32)(ipw) | 2;		\
+	} } while (0)
 #else
-#define nebulaos_fr_mmio(addr, write, ip) do { } while (0)
+#define nebulaos_fr_mmio(addr, write, val, ip) ((void)(ip), (u32 *)NULL)
+#define nebulaos_fr_mmio_done(e, val, ipw) do { (void)(e); } while (0)
 #endif
 
 #define __BUILD_MEMORY_SINGLE(pfx, bwlq, type, barrier, relax, irq, trace)	\
@@ -239,6 +250,8 @@ static inline void pfx##write##bwlq(type val,				\
 {									\
 	volatile type *__mem;						\
 	type __val;							\
+	u32 *__fr = NULL;						\
+	unsigned long __ip = _THIS_IP_;					\
 									\
 	if (barrier)							\
 		iobarrier_rw();						\
@@ -250,7 +263,8 @@ static inline void pfx##write##bwlq(type val,				\
 	__val = pfx##ioswab##bwlq(__mem, val);				\
 									\
 	if (trace)							\
-		nebulaos_fr_mmio((unsigned long)__mem, 1, _THIS_IP_);	\
+		__fr = nebulaos_fr_mmio((unsigned long)__mem, 1,	\
+					(unsigned long)__val, __ip);	\
 	if (sizeof(type) != sizeof(u64) || sizeof(u64) == sizeof(long)) \
 		*__mem = __val;						\
 	else if (cpu_has_64bits) {					\
@@ -274,12 +288,16 @@ static inline void pfx##write##bwlq(type val,				\
 			local_irq_restore(__flags);			\
 	} else								\
 		BUG();							\
+	if (trace)							\
+		nebulaos_fr_mmio_done(__fr, __val, __ip | 1);		\
 }									\
 									\
 static inline type pfx##read##bwlq(const volatile void __iomem *mem)	\
 {									\
 	volatile type *__mem;						\
 	type __val;							\
+	u32 *__fr = NULL;						\
+	unsigned long __ip = _THIS_IP_;					\
 									\
 	__mem = (void *)__swizzle_addr_##bwlq((unsigned long)(mem));	\
 									\
@@ -287,7 +305,7 @@ static inline type pfx##read##bwlq(const volatile void __iomem *mem)	\
 		iobarrier_rw();						\
 									\
 	if (trace)							\
-		nebulaos_fr_mmio((unsigned long)__mem, 0, _THIS_IP_);	\
+		__fr = nebulaos_fr_mmio((unsigned long)__mem, 0, 0, __ip); \
 	if (sizeof(type) != sizeof(u64) || sizeof(u64) == sizeof(long)) \
 		__val = *__mem;						\
 	else if (cpu_has_64bits) {					\
@@ -310,6 +328,8 @@ static inline type pfx##read##bwlq(const volatile void __iomem *mem)	\
 		__val = 0;						\
 		BUG();							\
 	}								\
+	if (trace)							\
+		nebulaos_fr_mmio_done(__fr, __val, __ip);		\
 									\
 	/* prevent prefetching of coherent DMA data prematurely */	\
 	if (!relax)							\
