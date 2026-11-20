@@ -96,6 +96,38 @@ static void percpu_irq_init(struct core_irq_chips *irq_chips, unsigned int cpu_n
 	irq_chip->next_irq_resp = 0;
 	irq_chips->chip_data.iobase[cpu] = iobase;
 
+	/*
+	 * NebulaOS: put this CPU's mask bank into a known state. The vendor code
+	 * never initialises it, so it keeps whatever the boot loader left; mask,
+	 * unmask and ack only write the bank of chip->intc_num[hwirq], so a source
+	 * left unmasked here but routed to another CPU can never be masked on this
+	 * CPU again. With interrupt migration on, the migration code rewrites the
+	 * banks and hides that; with it off, CPU1 took the console UART's
+	 * interrupt in a storm until the lockup watchdog fired (ke-dev,
+	 * 2026-11-20). Mask every source not routed to this CPU; leave the ones
+	 * that are (CPU hotplug re-init) as they are.
+	 */
+	{
+		struct irq_chip_data *chip = &irq_chips->chip_data;
+		unsigned long flags;
+		int g, b;
+
+		raw_spin_lock_irqsave(&chip->lock, flags);
+		for (g = 0; g < (INTC_NR_IRQS + 31) / 32; g++) {
+			u32 before = readl(iobase + g * PART_OFF + IMR_OFF);
+			u32 set = 0;
+
+			for (b = 0; b < 32 && g * 32 + b < INTC_NR_IRQS; b++)
+				if (chip->intc_num[g * 32 + b] != cpu)
+					set |= BIT(b);
+			writel(set, iobase + g * PART_OFF + IMSR_OFF);
+			pr_info("ingenic-intc: cpu%d bank group %d: IMR %08x -> %08x\n",
+				cpu, g, before,
+				readl(iobase + g * PART_OFF + IMR_OFF));
+		}
+		raw_spin_unlock_irqrestore(&chip->lock, flags);
+	}
+
 	*this_cpu_ptr(irq_chips->percpu_irq_chip) = irq_chip;
 	enable_percpu_irq(irq_chips->irq, IRQ_TYPE_NONE);
 
