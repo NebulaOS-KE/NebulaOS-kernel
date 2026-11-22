@@ -60,8 +60,29 @@
  * about the last 15 ms of a busy USB host. Power of two. */
 #define NFR_MMIO_N	2048
 #define NFR_MMIO_ENT	16
-/* Transfer-log records per CPU (v4). Power of two. */
-#define NFR_XFER_N	4096
+/* Transfer-log records per CPU (v4). Power of two. Wi-Fi (SDIO) alone can
+ * add ~10000 records/s while a browser streams the camera, so the ring is
+ * backed by the per-channel/per-host state slots below. */
+#define NFR_XFER_N	8192
+/* v4 state slots: the newest transfer-log record per source, so the last
+ * start/interrupt/completion of every USB channel and MMC host survives
+ * however busy the others are. 16 USB channels x 3 + 4 MMC hosts x 3 + CLK. */
+#define NFR_ST_USB_START	0
+#define NFR_ST_USB_HALT		16
+#define NFR_ST_USB_CHINT	32
+#define NFR_ST_MMC_CMD		48
+#define NFR_ST_MMC_IRQ		52
+#define NFR_ST_MMC_DONE		56
+#define NFR_ST_CLK		60
+#define NFR_ST_N		64
+
+struct nfr_rec {
+	u32 ts;			/* sched_clock() >> 10 (units of 1.024 us) */
+	u16 type;
+	u16 arg;
+	u32 a;
+	u32 b;
+};
 
 struct nfr_hdr {
 	u32 magic;
@@ -76,15 +97,10 @@ struct nfr_hdr {
 	u32 mmio_idx[NFR_MAX_CPUS]; /* next register-log slot per CPU */
 	u32 xfer_n;		/* v4: transfer-log records per CPU, power of two */
 	u32 xfer_idx[NFR_MAX_CPUS]; /* v4: next transfer-log slot per CPU */
+	u32 st_cpu[NFR_ST_N];	/* v4: CPU that wrote each state slot */
+	struct nfr_rec st[NFR_ST_N]; /* v4: newest record per source (see NFR_ST_*) */
 };
 
-struct nfr_rec {
-	u32 ts;			/* sched_clock() >> 10 (units of 1.024 us) */
-	u16 type;
-	u16 arg;
-	u32 a;
-	u32 b;
-};
 
 int nebulaos_fr_enabled __read_mostly;
 EXPORT_SYMBOL_GPL(nebulaos_fr_enabled);
@@ -175,14 +191,30 @@ out:
 }
 EXPORT_SYMBOL_GPL(__nebulaos_fr_log);
 
-/* Same record and write order as __nebulaos_fr_log, into the transfer log. */
+static int nfr_state_slot(unsigned int type, unsigned int arg, unsigned long b)
+{
+	switch (type) {
+	case NFR_USB_START:	return NFR_ST_USB_START + ((b >> 24) & 15);
+	case NFR_USB_HALT:	return NFR_ST_USB_HALT + (arg & 15);
+	case NFR_USB_CHINT:	return NFR_ST_USB_CHINT + (arg & 15);
+	case NFR_MMC_CMD:	return NFR_ST_MMC_CMD + ((arg >> 8) & 3);
+	case NFR_MMC_IRQ:	return NFR_ST_MMC_IRQ + (arg & 3);
+	case NFR_MMC_DONE:	return NFR_ST_MMC_DONE + ((arg >> 8) & 3);
+	case NFR_CLK:		return NFR_ST_CLK;
+	default:		return -1;
+	}
+}
+
+/* Same record and write order as __nebulaos_fr_log, into the transfer log,
+ * then the same record into the source's state slot. */
 void __nebulaos_fr_xfer(unsigned int type, unsigned int arg,
 			unsigned long a, unsigned long b)
 {
+	struct nfr_hdr __iomem *h = nfr_base;
 	struct nfr_rec __iomem *r;
 	unsigned long flags;
-	int cpu;
-	u32 idx;
+	int cpu, st;
+	u32 idx, ts;
 
 	local_irq_save(flags);
 	cpu = raw_smp_processor_id();
@@ -194,11 +226,22 @@ void __nebulaos_fr_xfer(unsigned int type, unsigned int arg,
 	__raw_writel((u32)b, &r->b);
 	__raw_writel((type & 0xffff) | ((arg & 0xffff) << 16), &r->type);
 	__this_cpu_write(nfr_busy, 1);
-	__raw_writel((u32)(sched_clock() >> 10), &r->ts);
+	ts = (u32)(sched_clock() >> 10);
 	__this_cpu_write(nfr_busy, 0);
+	__raw_writel(ts, &r->ts);
 	idx++;
 	__this_cpu_write(nfr_xfer_idx, idx);
-	__raw_writel(idx, &((struct nfr_hdr __iomem *)nfr_base)->xfer_idx[cpu]);
+	__raw_writel(idx, &h->xfer_idx[cpu]);
+	st = nfr_state_slot(type, arg, b);
+	if (st >= 0) {
+		/* ts 0 first: a slot cut short by the freeze reads as unwritten */
+		__raw_writel(0, &h->st[st].ts);
+		__raw_writel((u32)a, &h->st[st].a);
+		__raw_writel((u32)b, &h->st[st].b);
+		__raw_writel((type & 0xffff) | ((arg & 0xffff) << 16), &h->st[st].type);
+		__raw_writel(cpu, &h->st_cpu[st]);
+		__raw_writel(ts ? ts : 1, &h->st[st].ts);
+	}
 out:
 	local_irq_restore(flags);
 }
@@ -284,12 +327,59 @@ static void nfr_addr(struct seq_file *m, u32 v, bool sym)
 		seq_printf(m, " 0x%08x", v);
 }
 
+static void nfr_show_xfer(struct seq_file *m, int cpu, const struct nfr_rec *r, u32 newest)
+{
+	unsigned int t = r->type < NFR_NR_TYPES ? r->type : 0;
+	s32 dt = (s32)(newest - r->ts);	/* 1.024 us units */
+	s64 us = div_s64((s64)dt * 1024, 1000);
+	u32 us_abs = (u32)(us < 0 ? -us : us);
+
+	seq_printf(m, "cpu%d X %10u dt=%c%6u.%03u %-5s", cpu, r->ts,
+		   us < 0 ? '-' : ' ', us_abs / 1000, us_abs % 1000, nfr_names[t]);
+	switch (t) {
+	case NFR_USB_START:
+		seq_printf(m, " ch=%u dev=%u ep=%u%s %s%s%s len=%u dma=0x%08x",
+			   r->b >> 24, r->arg & 0x7f, (r->arg >> 7) & 0xf,
+			   (r->arg >> 11) & 1 ? "in" : "out",
+			   nfr_usb_types[(r->arg >> 12) & 3],
+			   (r->arg >> 14) & 1 ? " split" : "",
+			   (r->arg >> 15) & 1 ? " ping" : "",
+			   r->b & 0xffffff, r->a);
+		break;
+	case NFR_USB_HALT:
+		seq_printf(m, " ch=%u status=%u", r->arg, r->a);
+		break;
+	case NFR_USB_CHINT:
+		seq_printf(m, " ch=%u hcint=0x%08x mask=0x%08x", r->arg, r->a, r->b);
+		break;
+	case NFR_MMC_CMD:
+		seq_printf(m, " mmc%u CMD%u arg=0x%08x", r->arg >> 8, r->arg & 0xff, r->a);
+		if (r->b)
+			seq_printf(m, " blocks=%u blksz=%u", r->b >> 16, r->b & 0xffff);
+		break;
+	case NFR_MMC_IRQ:
+		seq_printf(m, " mmc%u status=0x%08x", r->arg, r->a);
+		break;
+	case NFR_MMC_DONE:
+		seq_printf(m, " mmc%u CMD%u err=%d data_err=%d", r->arg >> 8,
+			   r->arg & 0xff, (s32)r->a, (s32)r->b);
+		break;
+	case NFR_CLK:
+		seq_printf(m, " boottime=%u.%03u s wall=%u", r->a / 1000, r->a % 1000, r->b);
+		break;
+	default:
+		seq_printf(m, " %u 0x%08x 0x%08x", r->arg, r->a, r->b);
+		break;
+	}
+	seq_putc(m, '\n');
+}
+
 static void nfr_show_area(struct seq_file *m, const void *area, const char *what)
 {
 	const struct nfr_hdr *h = area;
 	bool sym;
 	u32 newest = 0;
-	int cpu;
+	int cpu, st;
 	const void *ev;
 
 	if (h->magic != NFR_MAGIC || h->version != NFR_VERSION ||
@@ -414,53 +504,16 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 
 		seq_printf(m, "== cpu%d: last %u of %u transfer-log records (oldest first)\n"
 			   "   dt as above (negative = after the newest event)\n", cpu, n, end);
-		for (i = end - n; i != end; i++) {
-			const struct nfr_rec *r = xr + (size_t)cpu * h->xfer_n + (i & (h->xfer_n - 1));
-			unsigned int t = r->type < NFR_NR_TYPES ? r->type : 0;
-			s32 dt = (s32)(newest - r->ts);	/* 1.024 us units */
-			s64 us = div_s64((s64)dt * 1024, 1000);
-			u32 us_abs = (u32)(us < 0 ? -us : us);
-
-			seq_printf(m, "cpu%d X %10u dt=%c%6u.%03u %-5s", cpu, r->ts,
-				   us < 0 ? '-' : ' ', us_abs / 1000, us_abs % 1000, nfr_names[t]);
-			switch (t) {
-			case NFR_USB_START:
-				seq_printf(m, " ch=%u dev=%u ep=%u%s %s%s%s len=%u dma=0x%08x",
-					   r->b >> 24, r->arg & 0x7f, (r->arg >> 7) & 0xf,
-					   (r->arg >> 11) & 1 ? "in" : "out",
-					   nfr_usb_types[(r->arg >> 12) & 3],
-					   (r->arg >> 14) & 1 ? " split" : "",
-					   (r->arg >> 15) & 1 ? " ping" : "",
-					   r->b & 0xffffff, r->a);
-				break;
-			case NFR_USB_HALT:
-				seq_printf(m, " ch=%u status=%u", r->arg, r->a);
-				break;
-			case NFR_USB_CHINT:
-				seq_printf(m, " ch=%u hcint=0x%08x mask=0x%08x", r->arg, r->a, r->b);
-				break;
-			case NFR_MMC_CMD:
-				seq_printf(m, " mmc%u CMD%u arg=0x%08x", r->arg >> 8, r->arg & 0xff, r->a);
-				if (r->b)
-					seq_printf(m, " blocks=%u blksz=%u", r->b >> 16, r->b & 0xffff);
-				break;
-			case NFR_MMC_IRQ:
-				seq_printf(m, " mmc%u status=0x%08x", r->arg, r->a);
-				break;
-			case NFR_MMC_DONE:
-				seq_printf(m, " mmc%u CMD%u err=%d data_err=%d", r->arg >> 8,
-					   r->arg & 0xff, (s32)r->a, (s32)r->b);
-				break;
-			case NFR_CLK:
-				seq_printf(m, " boottime=%u.%03u s wall=%u", r->a / 1000, r->a % 1000, r->b);
-				break;
-			default:
-				seq_printf(m, " %u 0x%08x 0x%08x", r->arg, r->a, r->b);
-				break;
-			}
-			seq_putc(m, '\n');
-		}
+		for (i = end - n; i != end; i++)
+			nfr_show_xfer(m, cpu, xr + (size_t)cpu * h->xfer_n + (i & (h->xfer_n - 1)),
+				      newest);
 	}
+
+	seq_puts(m, "== transfer state: the newest record per USB channel / MMC host / clock\n"
+		    "   (kept however busy the other sources were; cpu = the CPU that wrote it)\n");
+	for (st = 0; st < NFR_ST_N; st++)
+		if (h->st[st].ts && h->st_cpu[st] < h->ncpu)
+			nfr_show_xfer(m, h->st_cpu[st], &h->st[st], newest);
 }
 
 static int nfr_prev_show(struct seq_file *m, void *v)
@@ -618,6 +671,7 @@ static int __init nfr_init(void)
 	WRITE_ONCE(nebulaos_fr_enabled, 1);
 	__raw_writel(!nfr_mmio_param_off, &h->mmio_on);
 	WRITE_ONCE(nebulaos_fr_mmio_enabled, !nfr_mmio_param_off);
+	BUILD_BUG_ON(sizeof(struct nfr_hdr) > NFR_HDR_SIZE);
 	timer_setup(&nfr_clk_timer, nfr_clk_fn, 0);
 	mod_timer(&nfr_clk_timer, jiffies + HZ);
 	pr_info("nebulaos-flightrec: v%u recording at %pa, %u cpus x %u events + %u transfer records, register log %s; previous boot %s\n",
