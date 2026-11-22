@@ -307,6 +307,7 @@ static const char *const nfr_names[NFR_NR_TYPES] = {
 	[NFR_USB_START] = "USB>", [NFR_USB_HALT] = "USBH", [NFR_USB_CHINT] = "USBI",
 	[NFR_MMC_CMD] = "MMC>", [NFR_MMC_IRQ] = "MMCI", [NFR_MMC_DONE] = "MMC<",
 	[NFR_CLK] = "CLK",
+	[NFR_IPI_SEND] = "IPI>", [NFR_CSD_IN] = "CSD>", [NFR_CSD_OUT] = "CSD<",
 };
 
 static const char *const nfr_usb_types[4] = { "ctrl", "isoc", "bulk", "intr" };
@@ -437,7 +438,17 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 				nfr_addr(m, r->b, sym);
 				break;
 			case NFR_THR_IN: case NFR_SIRQ_IN: case NFR_TMR_IN:
-			case NFR_TMR_OUT: case NFR_WQ_OUT:
+			case NFR_TMR_OUT: case NFR_WQ_OUT: case NFR_CSD_OUT:
+				nfr_addr(m, r->a, sym);
+				break;
+			case NFR_CSD_IN:
+				nfr_addr(m, r->a, sym);
+				seq_printf(m, " info=0x%08x", r->b);
+				break;
+			case NFR_IPI_SEND:
+				seq_printf(m, " to cpu%u %s%s from", r->arg & 0xff,
+					   (r->arg >> 8) & 1 ? "resched " : "",
+					   (r->arg >> 8) & 2 ? "call-func" : "");
 				nfr_addr(m, r->a, sym);
 				break;
 			case NFR_WQ_IN:

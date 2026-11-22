@@ -41,6 +41,11 @@ enum nfr_type {
 	NFR_MMC_IRQ,	/* arg = host, a = SDHCI interrupt status */
 	NFR_MMC_DONE,	/* arg = opcode | host<<8, a = cmd error, b = data error */
 	NFR_CLK,	/* once a second: a = boottime in ms, b = wall-clock seconds */
+	/* test3 (2026-11-22, #27): what each inter-CPU interrupt asked for.
+	 * 4 of 11 freeze recordings end right after an IPI. */
+	NFR_IPI_SEND,	/* arg = target cpu | action<<8, a = caller */
+	NFR_CSD_IN,	/* IPI callback starts: a = function, b = info */
+	NFR_CSD_OUT,	/* IPI callback returned: a = function */
 	NFR_NR_TYPES
 };
 
