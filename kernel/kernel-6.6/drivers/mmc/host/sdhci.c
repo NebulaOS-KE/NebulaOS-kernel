@@ -31,6 +31,7 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/sdio.h>
 #include <linux/mmc/slot-gpio.h>
+#include <linux/nebulaos_flightrec.h>
 
 #include "sdhci.h"
 
@@ -1587,6 +1588,9 @@ static void sdhci_set_mrq_done(struct sdhci_host *host, struct mmc_request *mrq)
 
 static void __sdhci_finish_mrq(struct sdhci_host *host, struct mmc_request *mrq)
 {
+	nebulaos_fr_xfer(NFR_MMC_DONE, (mrq->cmd ? mrq->cmd->opcode & 0xff : 0) |
+			 (host->mmc->index & 0xff) << 8,
+			 mrq->cmd ? mrq->cmd->error : 0, mrq->data ? mrq->data->error : 0);
 	if (host->cmd && host->cmd->mrq == mrq) {
 		host->cmd = NULL;
 	}
@@ -1710,6 +1714,10 @@ static bool sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 	unsigned long timeout;
 
 	WARN_ON(host->cmd);
+
+	nebulaos_fr_xfer(NFR_MMC_CMD, (cmd->opcode & 0xff) | (host->mmc->index & 0xff) << 8,
+			 cmd->arg, cmd->data ? (cmd->data->blocks << 16) |
+			 (cmd->data->blksz & 0xffff) : 0);
 
 	/* Initially, a command has no error */
 	cmd->error = 0;
@@ -3705,6 +3713,7 @@ static irqreturn_t sdhci_irq(int irq, void *dev_id)
 	}
 
 	intmask = sdhci_readl(host, SDHCI_INT_STATUS);
+	nebulaos_fr_xfer(NFR_MMC_IRQ, host->mmc->index, intmask, 0);
 	if (!intmask || intmask == 0xffffffff) {
 		result = IRQ_NONE;
 		goto out;

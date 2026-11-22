@@ -19,6 +19,7 @@
 
 #include <linux/usb/hcd.h>
 #include <linux/usb/ch11.h>
+#include <linux/nebulaos_flightrec.h>
 
 #include "core.h"
 #include "hcd.h"
@@ -2023,6 +2024,7 @@ static void dwc2_hc_n_intr(struct dwc2_hsotg *hsotg, int chnum)
 	hcintmsk = dwc2_readl(hsotg, HCINTMSK(chnum));
 	hcint = hcintraw & hcintmsk;
 	dwc2_writel(hsotg, hcint, HCINT(chnum));
+	nebulaos_fr_xfer(NFR_USB_CHINT, chnum, hcintraw, hcintmsk);
 
 	if (!chan) {
 		dev_err(hsotg->dev, "## hc_ptr_array for channel is NULL ##\n");

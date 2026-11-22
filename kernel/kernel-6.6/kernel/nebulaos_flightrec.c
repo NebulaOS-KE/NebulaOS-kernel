@@ -10,6 +10,11 @@
  *               CPU's next event index and next register-log index
  *   page 1..    register-log rings, NFR_MMIO_N entries of 16 bytes per CPU:
  *               {event index, address, code address | 1 write | 2 done, value}
+ *   then        (v4) transfer-log rings, NFR_XFER_N records of 16 bytes per
+ *               CPU: USB channel starts/halts/channel interrupts, SD/MMC
+ *               commands/interrupts/completions and a once-a-second clock
+ *               pair (boottime, wall clock) - kept apart from the event ring,
+ *               which the 8 kHz USB SOF interrupts fill in about a second
  *   then        one event ring per possible CPU, NR entries of 16 bytes
  * A record is written a, b, type/arg, ts, then the index: a record cut short
  * by the freeze is the one at index (not yet counted) and is never shown.
@@ -41,18 +46,22 @@
 #include <linux/sched/clock.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/timekeeping.h>
+#include <linux/timer.h>
 #include <linux/uaccess.h>
 #include <linux/utsname.h>
 #include <linux/vmalloc.h>
 
 #define NFR_MAGIC	0x4e465231	/* "NFR1" */
-#define NFR_VERSION	3
+#define NFR_VERSION	4
 #define NFR_HDR_SIZE	4096
 #define NFR_MAX_CPUS	8
 /* Last device-register accesses per CPU (readX/writeX, asm/io.h). 2048 is
  * about the last 15 ms of a busy USB host. Power of two. */
 #define NFR_MMIO_N	2048
 #define NFR_MMIO_ENT	16
+/* Transfer-log records per CPU (v4). Power of two. */
+#define NFR_XFER_N	4096
 
 struct nfr_hdr {
 	u32 magic;
@@ -65,6 +74,8 @@ struct nfr_hdr {
 	u32 mmio_n;		/* register-log entries per CPU, power of two */
 	u32 idx[NFR_MAX_CPUS];	/* next slot per CPU (monotonic, masked on use) */
 	u32 mmio_idx[NFR_MAX_CPUS]; /* next register-log slot per CPU */
+	u32 xfer_n;		/* v4: transfer-log records per CPU, power of two */
+	u32 xfer_idx[NFR_MAX_CPUS]; /* v4: next transfer-log slot per CPU */
 };
 
 struct nfr_rec {
@@ -85,6 +96,8 @@ static void __iomem *nfr_base;
 static u32 nfr_ncpu, nfr_nent;
 static DEFINE_PER_CPU(u32, nfr_idx);
 static DEFINE_PER_CPU(u32, nfr_mmio_idx);
+static DEFINE_PER_CPU(u32, nfr_xfer_idx);
+static struct timer_list nfr_clk_timer;
 static DEFINE_PER_CPU(int, nfr_busy);	/* inside __nebulaos_fr_log: its clock reads are not noted */
 
 static void *nfr_prev;		/* copy of the previous boot's area, or NULL */
@@ -111,15 +124,27 @@ static u32 nfr_banner_crc(void)
 	return crc32(0, linux_banner, strlen(linux_banner));
 }
 
-static inline size_t nfr_events_off(u32 ncpu, u32 mmio_n)
+static inline size_t nfr_xfer_off(u32 ncpu, u32 mmio_n)
 {
 	return NFR_HDR_SIZE + (size_t)ncpu * mmio_n * NFR_MMIO_ENT;
 }
 
+static inline size_t nfr_events_off(u32 ncpu, u32 mmio_n, u32 xfer_n)
+{
+	return nfr_xfer_off(ncpu, mmio_n) + (size_t)ncpu * xfer_n * sizeof(struct nfr_rec);
+}
+
 static inline struct nfr_rec __iomem *nfr_slot(int cpu, u32 idx)
 {
-	return (struct nfr_rec __iomem *)(nfr_base + nfr_events_off(nfr_ncpu, NFR_MMIO_N)) +
+	return (struct nfr_rec __iomem *)(nfr_base +
+					  nfr_events_off(nfr_ncpu, NFR_MMIO_N, NFR_XFER_N)) +
 		(size_t)cpu * nfr_nent + (idx & (nfr_nent - 1));
+}
+
+static inline struct nfr_rec __iomem *nfr_xfer_slot(int cpu, u32 idx)
+{
+	return (struct nfr_rec __iomem *)(nfr_base + nfr_xfer_off(nfr_ncpu, NFR_MMIO_N)) +
+		(size_t)cpu * NFR_XFER_N + (idx & (NFR_XFER_N - 1));
 }
 
 void __nebulaos_fr_log(unsigned int type, unsigned int arg,
@@ -149,6 +174,45 @@ out:
 	local_irq_restore(flags);
 }
 EXPORT_SYMBOL_GPL(__nebulaos_fr_log);
+
+/* Same record and write order as __nebulaos_fr_log, into the transfer log. */
+void __nebulaos_fr_xfer(unsigned int type, unsigned int arg,
+			unsigned long a, unsigned long b)
+{
+	struct nfr_rec __iomem *r;
+	unsigned long flags;
+	int cpu;
+	u32 idx;
+
+	local_irq_save(flags);
+	cpu = raw_smp_processor_id();
+	if (unlikely(cpu >= nfr_ncpu))
+		goto out;
+	idx = __this_cpu_read(nfr_xfer_idx);
+	r = nfr_xfer_slot(cpu, idx);
+	__raw_writel((u32)a, &r->a);
+	__raw_writel((u32)b, &r->b);
+	__raw_writel((type & 0xffff) | ((arg & 0xffff) << 16), &r->type);
+	__this_cpu_write(nfr_busy, 1);
+	__raw_writel((u32)(sched_clock() >> 10), &r->ts);
+	__this_cpu_write(nfr_busy, 0);
+	idx++;
+	__this_cpu_write(nfr_xfer_idx, idx);
+	__raw_writel(idx, &((struct nfr_hdr __iomem *)nfr_base)->xfer_idx[cpu]);
+out:
+	local_irq_restore(flags);
+}
+EXPORT_SYMBOL_GPL(__nebulaos_fr_xfer);
+
+/* Once a second: pair the recorder clock (sched_clock, the record's ts) with
+ * boottime (what /proc/uptime and the heartbeat use) and the wall clock, so a
+ * recording can be lined up with the heartbeat and with Klipper's log. */
+static void nfr_clk_fn(struct timer_list *t)
+{
+	nebulaos_fr_xfer(NFR_CLK, 0, (u32)div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC),
+			 (u32)ktime_get_real_seconds());
+	mod_timer(&nfr_clk_timer, jiffies + HZ);
+}
 
 /* Called from readX/writeX BEFORE the access (asm/io.h). The barrier makes
  * the note reach DRAM before the device access is issued, so a CPU stalled
@@ -197,7 +261,12 @@ static const char *const nfr_names[NFR_NR_TYPES] = {
 	[NFR_WQ_IN] = "WQ>", [NFR_WQ_OUT] = "WQ<",
 	[NFR_SWITCH] = "SW", [NFR_MARK] = "MARK", [NFR_CTL] = "CTL",
 	[NFR_DMAC_IN] = "DMAC>", [NFR_DMAC_OUT] = "DMAC<",
+	[NFR_USB_START] = "USB>", [NFR_USB_HALT] = "USBH", [NFR_USB_CHINT] = "USBI",
+	[NFR_MMC_CMD] = "MMC>", [NFR_MMC_IRQ] = "MMCI", [NFR_MMC_DONE] = "MMC<",
+	[NFR_CLK] = "CLK",
 };
+
+static const char *const nfr_usb_types[4] = { "ctrl", "isoc", "bulk", "intr" };
 
 static const char *nfr_dmac_name(unsigned int op)
 {
@@ -226,14 +295,15 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 	if (h->magic != NFR_MAGIC || h->version != NFR_VERSION ||
 	    !h->ncpu || h->ncpu > NFR_MAX_CPUS || !h->nent ||
 	    (h->nent & (h->nent - 1)) || !h->mmio_n || (h->mmio_n & (h->mmio_n - 1)) ||
-	    nfr_events_off(h->ncpu, h->mmio_n) +
+	    !h->xfer_n || (h->xfer_n & (h->xfer_n - 1)) ||
+	    nfr_events_off(h->ncpu, h->mmio_n, h->xfer_n) +
 	    (size_t)h->ncpu * h->nent * sizeof(struct nfr_rec) > nfr_size) {
 		seq_printf(m, "%s: no valid recording%s\n", what,
 			   h->magic == NFR_MAGIC && h->version != NFR_VERSION ?
 			   " (written by another recorder version)" : "");
 		return;
 	}
-	ev = area + nfr_events_off(h->ncpu, h->mmio_n);
+	ev = area + nfr_events_off(h->ncpu, h->mmio_n, h->xfer_n);
 	sym = h->banner_crc == nfr_banner_crc();
 	seq_printf(m, "%s: ncpu=%u entries/cpu=%u symbols=%s register-log=%s\n", what,
 		   h->ncpu, h->nent, sym ? "this kernel" : "OTHER kernel (raw addresses)",
@@ -334,6 +404,60 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 				seq_printf(m, " after-ts=%u", r->ts);
 			}
 			nfr_addr(m, ipw & ~3u, sym);
+			seq_putc(m, '\n');
+		}
+	}
+
+	for (cpu = 0; cpu < h->ncpu; cpu++) {
+		const struct nfr_rec *xr = area + nfr_xfer_off(h->ncpu, h->mmio_n);
+		u32 end = h->xfer_idx[cpu], n = min(end, h->xfer_n), i;
+
+		seq_printf(m, "== cpu%d: last %u of %u transfer-log records (oldest first)\n"
+			   "   dt as above (negative = after the newest event)\n", cpu, n, end);
+		for (i = end - n; i != end; i++) {
+			const struct nfr_rec *r = xr + (size_t)cpu * h->xfer_n + (i & (h->xfer_n - 1));
+			unsigned int t = r->type < NFR_NR_TYPES ? r->type : 0;
+			s32 dt = (s32)(newest - r->ts);	/* 1.024 us units */
+			s64 us = div_s64((s64)dt * 1024, 1000);
+			u32 us_abs = (u32)(us < 0 ? -us : us);
+
+			seq_printf(m, "cpu%d X %10u dt=%c%6u.%03u %-5s", cpu, r->ts,
+				   us < 0 ? '-' : ' ', us_abs / 1000, us_abs % 1000, nfr_names[t]);
+			switch (t) {
+			case NFR_USB_START:
+				seq_printf(m, " ch=%u dev=%u ep=%u%s %s%s%s len=%u dma=0x%08x",
+					   r->b >> 24, r->arg & 0x7f, (r->arg >> 7) & 0xf,
+					   (r->arg >> 11) & 1 ? "in" : "out",
+					   nfr_usb_types[(r->arg >> 12) & 3],
+					   (r->arg >> 14) & 1 ? " split" : "",
+					   (r->arg >> 15) & 1 ? " ping" : "",
+					   r->b & 0xffffff, r->a);
+				break;
+			case NFR_USB_HALT:
+				seq_printf(m, " ch=%u status=%u", r->arg, r->a);
+				break;
+			case NFR_USB_CHINT:
+				seq_printf(m, " ch=%u hcint=0x%08x mask=0x%08x", r->arg, r->a, r->b);
+				break;
+			case NFR_MMC_CMD:
+				seq_printf(m, " mmc%u CMD%u arg=0x%08x", r->arg >> 8, r->arg & 0xff, r->a);
+				if (r->b)
+					seq_printf(m, " blocks=%u blksz=%u", r->b >> 16, r->b & 0xffff);
+				break;
+			case NFR_MMC_IRQ:
+				seq_printf(m, " mmc%u status=0x%08x", r->arg, r->a);
+				break;
+			case NFR_MMC_DONE:
+				seq_printf(m, " mmc%u CMD%u err=%d data_err=%d", r->arg >> 8,
+					   r->arg & 0xff, (s32)r->a, (s32)r->b);
+				break;
+			case NFR_CLK:
+				seq_printf(m, " boottime=%u.%03u s wall=%u", r->a / 1000, r->a % 1000, r->b);
+				break;
+			default:
+				seq_printf(m, " %u 0x%08x 0x%08x", r->arg, r->a, r->b);
+				break;
+			}
 			seq_putc(m, '\n');
 		}
 	}
@@ -446,11 +570,11 @@ static int __init nfr_init(void)
 	}
 	of_node_put(np);
 	nfr_size = resource_size(&res);
-	if (nfr_size < nfr_events_off(ncpu, NFR_MMIO_N) + 4096) {
+	if (nfr_size < nfr_events_off(ncpu, NFR_MMIO_N, NFR_XFER_N) + 4096) {
 		pr_err("nebulaos-flightrec: area too small, off\n");
 		return 0;
 	}
-	nent = rounddown_pow_of_two((nfr_size - nfr_events_off(ncpu, NFR_MMIO_N)) /
+	nent = rounddown_pow_of_two((nfr_size - nfr_events_off(ncpu, NFR_MMIO_N, NFR_XFER_N)) /
 				    ncpu / sizeof(struct nfr_rec));
 
 	nfr_base = ioremap(res.start, nfr_size);	/* MIPS: uncached */
@@ -478,10 +602,13 @@ static int __init nfr_init(void)
 	__raw_writel(ncpu, &h->ncpu);
 	__raw_writel(nent, &h->nent);
 	__raw_writel(NFR_MMIO_N, &h->mmio_n);
+	__raw_writel(NFR_XFER_N, &h->xfer_n);
 	__raw_writel(nfr_banner_crc(), &h->banner_crc);
 	__raw_writel((u32)(sched_clock() >> 10), &h->boot_ts);
-	for_each_possible_cpu(cpu)
+	for_each_possible_cpu(cpu) {
 		per_cpu(nfr_idx, cpu) = 0;
+		per_cpu(nfr_xfer_idx, cpu) = 0;
+	}
 	nfr_ncpu = ncpu;
 	nfr_nent = nent;
 	wmb();
@@ -491,8 +618,10 @@ static int __init nfr_init(void)
 	WRITE_ONCE(nebulaos_fr_enabled, 1);
 	__raw_writel(!nfr_mmio_param_off, &h->mmio_on);
 	WRITE_ONCE(nebulaos_fr_mmio_enabled, !nfr_mmio_param_off);
-	pr_info("nebulaos-flightrec: recording at %pa, %u cpus x %u events, register log %s; previous boot %s\n",
-		&res.start, ncpu, nent, nfr_mmio_param_off ? "off" : "on",
+	timer_setup(&nfr_clk_timer, nfr_clk_fn, 0);
+	mod_timer(&nfr_clk_timer, jiffies + HZ);
+	pr_info("nebulaos-flightrec: v%u recording at %pa, %u cpus x %u events + %u transfer records, register log %s; previous boot %s\n",
+		NFR_VERSION, &res.start, ncpu, nent, NFR_XFER_N, nfr_mmio_param_off ? "off" : "on",
 		nfr_prev ? "saved" : "had no recording");
 	return 0;
 }

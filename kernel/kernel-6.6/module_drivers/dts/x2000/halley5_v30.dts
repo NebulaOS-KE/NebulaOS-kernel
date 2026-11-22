@@ -85,10 +85,12 @@
 		 * next boot at /proc/nebulaos_flightrec_prev. Next to ramoops, in
 		 * the same bootloader-untouched part of the disabled ISP pool.
 		 * 4 KB header + 2 CPUs x 2048 x 16 bytes register log (v3,
-		 * 2026-11-19) + 2 CPUs x 32768 x 16 bytes events. */
+		 * 2026-11-19) + 2 CPUs x 4096 x 16 bytes transfer log (v4,
+		 * 2026-11-22) + 2 CPUs x 32768 x 16 bytes events. Ends at
+		 * 0x0e230fff, still inside the disabled 32 MB ISP pool. */
 		nebulaos_flightrec: flightrec@e100000 {
 			compatible = "nebulaos,flightrec";
-			reg = <0x0e100000 0x111000>;
+			reg = <0x0e100000 0x131000>;
 			no-map;
 		};
 	};

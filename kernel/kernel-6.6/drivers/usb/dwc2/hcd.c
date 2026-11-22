@@ -23,6 +23,7 @@
 #include <linux/usb/hcd.h>
 #include <linux/usb/ch11.h>
 #include <linux/usb/of.h>
+#include <linux/nebulaos_flightrec.h>
 
 #include "core.h"
 #include "hcd.h"
@@ -789,6 +790,8 @@ void dwc2_hc_halt(struct dwc2_hsotg *hsotg, struct dwc2_host_chan *chan,
 	if (dbg_hc(chan))
 		dev_vdbg(hsotg->dev, "%s()\n", __func__);
 
+	nebulaos_fr_xfer(NFR_USB_HALT, chan->hc_num, halt_status, 0);
+
 	/*
 	 * In buffer DMA or external DMA mode channel can't be halted
 	 * for non-split periodic channels. At the end of the next
@@ -1219,6 +1222,12 @@ static void dwc2_hc_start_transfer(struct dwc2_hsotg *hsotg,
 
 	if (dbg_hc(chan))
 		dev_vdbg(hsotg->dev, "%s()\n", __func__);
+
+	nebulaos_fr_xfer(NFR_USB_START,
+			 chan->dev_addr | chan->ep_num << 7 | chan->ep_is_in << 11 |
+			 chan->ep_type << 12 | (chan->do_split ? 1 : 0) << 14 |
+			 (chan->do_ping ? 1 : 0) << 15,
+			 (u32)chan->xfer_dma, (chan->xfer_len & 0xffffff) | (u32)chan->hc_num << 24);
 
 	if (chan->do_ping) {
 		if (!hsotg->params.host_dma) {
