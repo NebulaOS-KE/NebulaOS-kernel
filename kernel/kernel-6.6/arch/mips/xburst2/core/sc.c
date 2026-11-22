@@ -53,6 +53,13 @@ static void mips_sc_inv(unsigned long addr, unsigned long size)
 	 * it a store still in flight can land in a line after its invalidate,
 	 * and the CPU later reads that stale line instead of the DMA data. */
 	__sync();
+	/* NebulaOS 2026-11-22 (DEV test, #27): an uncached load before the L2
+	 * operations as well as after, as the X2600 workaround for stale L2
+	 * data after DMA does (stale reads there came from the L2-to-DDR
+	 * prefetcher). Our 6.6 also invalidates after DMA (XBurst2 is in
+	 * cpu_needs_post_dma_flush), so this tests whether the ordering
+	 * matters on X2000 at all; one change only. */
+	__fast_iob();
 	if (size >= scache_size) {
 		if (lsize == 64) {
 			blast_scache64();
