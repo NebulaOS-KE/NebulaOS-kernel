@@ -538,9 +538,11 @@ static int ingenicfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long
 }
 
 /* #27: cache attribute of the user framebuffer mapping, see ingenicfb_mmap */
-static unsigned int fb_cca;
+/* Test build 5: default 1 = vendor 6.x (as test3) for the ke-dev baseline;
+ * 0 = stock 4.4. Read at mmap time: restart the screen after changing it. */
+static unsigned int fb_cca = 1;
 module_param(fb_cca, uint, 0644);
-MODULE_PARM_DESC(fb_cca, "CCA of the user framebuffer mapping (0-3): 0 stock write-through (default), 1 vendor 6.x write-acceleration");
+MODULE_PARM_DESC(fb_cca, "CCA of the user framebuffer mapping (0-3): 0 stock write-through, 1 vendor 6.x write-acceleration (default)");
 
 int ingenicfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
@@ -581,8 +583,8 @@ int ingenicfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 		unsigned int cca = fb_cca <= 3 ? fb_cca : 0;
 
 		pgprot_val(vma->vm_page_prot) |= cca << _CACHE_SHIFT;
-		pr_info_once("ingenicfb: user mapping CCA %u%s\n", cca,
-			     cca == 0 ? " (write-through, as stock 4.4)" : "");
+		pr_info("ingenicfb: user mapping CCA %u%s\n", cca,
+			cca == 0 ? " (write-through, as stock 4.4)" : "");
 	}
 #endif
 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,

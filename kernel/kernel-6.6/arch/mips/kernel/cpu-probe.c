@@ -1830,9 +1830,7 @@ static inline void cpu_probe_ingenic(struct cpuinfo_mips *c, unsigned int cpu)
 	case PRID_IMP_XBURST2:
 	case PRID_IMP_XBURST2_R2:
 		c->cputype = CPU_XBURST2;
-		/* NebulaOS (#27): no write-combining (CCA 1) mappings on XBurst2;
-		 * stock 4.4 never uses that path. See ingenicfb_mmap(). */
-		c->writecombine = _CACHE_UNCACHED;
+		c->writecombine = _CACHE_UNCACHED_ACCELERATED;
 		__cpu_name[cpu] = "Ingenic XBurst II";
 		break;
 

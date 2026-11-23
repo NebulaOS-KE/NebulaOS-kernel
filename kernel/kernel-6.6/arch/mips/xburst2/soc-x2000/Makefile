@@ -11,3 +11,4 @@ obj-y += libdmmu.o
 obj-y += gpio.o
 obj-y += reset.o
 obj-y += nebulaos_ddr.o
+obj-y += nebulaos_freeze.o
