@@ -537,6 +537,11 @@ static int ingenicfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long
 	return 0;
 }
 
+/* #27: cache attribute of the user framebuffer mapping, see ingenicfb_mmap */
+static unsigned int fb_cca;
+module_param(fb_cca, uint, 0644);
+MODULE_PARM_DESC(fb_cca, "CCA of the user framebuffer mapping (0-3): 0 stock write-through (default), 1 vendor 6.x write-acceleration");
+
 int ingenicfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	unsigned long start;
@@ -557,11 +562,28 @@ int ingenicfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	vma->vm_pgoff = off >> PAGE_SHIFT;
 	vm_flags_set(vma, VM_IO);
 	pgprot_val(vma->vm_page_prot) &= ~_CACHE_MASK;
-	/* Write-Acceleration */
 #ifdef CONFIG_FB_USING_CACHABLE
 	pgprot_val(vma->vm_page_prot) |= _CACHE_CACHABLE_NONCOHERENT;
 #else
-	pgprot_val(vma->vm_page_prot) |= _CACHE_CACHABLE_WA;
+	/*
+	 * NebulaOS (#27, 2026-11-23): the vendor 6.x driver mapped the
+	 * framebuffer "Write-Acceleration", _CACHE_CACHABLE_WA, which on XBurst2
+	 * is _CACHE_UNCACHED_ACCELERATED (CCA 1, the core's write-combining
+	 * path). Creality's stock 4.4 soc_fb.ko (jzfb_mmap) clears the cache
+	 * bits and maps CCA 0 (cacheable write-through). The X2000 freezes with
+	 * both hardware threads stopped in plain user code only on Ingenic's
+	 * 5.x/6.x kernels, while the screen keeps writing this mapping; stock
+	 * never uses CCA 1. Map it as stock does. fb_cca selects another CCA
+	 * (read at mmap time) for A/B tests: 1 is the vendor 6.x behaviour.
+	 */
+	{
+		/* XBurst II CCA 0-3 only: 4/5 streaming, 6/7 reserved */
+		unsigned int cca = fb_cca <= 3 ? fb_cca : 0;
+
+		pgprot_val(vma->vm_page_prot) |= cca << _CACHE_SHIFT;
+		pr_info_once("ingenicfb: user mapping CCA %u%s\n", cca,
+			     cca == 0 ? " (write-through, as stock 4.4)" : "");
+	}
 #endif
 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
 	                       vma->vm_end - vma->vm_start, vma->vm_page_prot)) {

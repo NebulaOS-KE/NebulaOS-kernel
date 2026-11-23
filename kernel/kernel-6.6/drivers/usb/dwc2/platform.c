@@ -29,12 +29,11 @@ static const char dwc2_driver_name[] = "dwc2";
 /*
  * NebulaOS: runtime switch for the hard-IRQ idle-SOF filter
  * (CONFIG_USB_DWC2_SOF_FILTER); /sys/module/dwc2/parameters/sof_filter.
- * Takes effect at the next interrupt. Default off since 2026-11-22
- * (#27): a 5h46m print completed with it off on a printer that froze
- * every 1.5-3 h with it on. Off costs ~15% of CPU0 (the IRQ thread wakes
- * for every SOF); Klipper runs on CPU1. Write Y to re-enable.
+ * Takes effect at the next interrupt. On by default again (2026-11-23):
+ * test build 3 (off) froze like test build 2 (on), and off wakes the IRQ
+ * thread - which runs on CPU1, Klipper's - for every SOF (~6700 IPIs/s).
  */
-bool dwc2_sof_filter_param;
+bool dwc2_sof_filter_param = true;
 module_param_named(sof_filter, dwc2_sof_filter_param, bool, 0644);
 MODULE_PARM_DESC(sof_filter, "filter idle SOF interrupts in hard-IRQ context");
 
