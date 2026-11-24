@@ -7,6 +7,10 @@
  * /proc/nebulaos_flightrec_prev. Purpose: when the SoC hard-freezes (no
  * interrupt is taken any more, so nothing else can log), the last entries
  * show what each CPU was doing.
+ *
+ * 1.0.5: the event ring always records; the transfer log, the inter-CPU
+ * events (IPI, CSD) and the register log (asm/io.h) only at the detail level
+ * (nebulaos_fr_detail, /proc/nebulaos_flightrec "detail=0|1").
  */
 #ifndef _LINUX_NEBULAOS_FLIGHTREC_H
 #define _LINUX_NEBULAOS_FLIGHTREC_H
@@ -57,6 +61,7 @@ enum nfr_dmac_op {
 
 #ifdef CONFIG_NEBULAOS_FLIGHTREC
 extern int nebulaos_fr_enabled;
+extern int nebulaos_fr_detail;
 void __nebulaos_fr_log(unsigned int type, unsigned int arg,
 		       unsigned long a, unsigned long b);
 
@@ -70,16 +75,27 @@ static __always_inline void nebulaos_fr_log(unsigned int type, unsigned int arg,
 void __nebulaos_fr_xfer(unsigned int type, unsigned int arg,
 			unsigned long a, unsigned long b);
 
-/* Transfer log (USB channels, SD/MMC commands, clock pairs). */
+/* Event-ring record at the detail level only (inter-CPU events). */
+static __always_inline void nebulaos_fr_log_detail(unsigned int type, unsigned int arg,
+						   unsigned long a, unsigned long b)
+{
+	if (unlikely(READ_ONCE(nebulaos_fr_detail)) && READ_ONCE(nebulaos_fr_enabled))
+		__nebulaos_fr_log(type, arg, a, b);
+}
+
+/* Transfer log (USB channels, SD/MMC commands), detail level only. The
+ * once-a-second clock pair is written by the recorder itself at every level. */
 static __always_inline void nebulaos_fr_xfer(unsigned int type, unsigned int arg,
 					     unsigned long a, unsigned long b)
 {
-	if (READ_ONCE(nebulaos_fr_enabled))
+	if (unlikely(READ_ONCE(nebulaos_fr_detail)) && READ_ONCE(nebulaos_fr_enabled))
 		__nebulaos_fr_xfer(type, arg, a, b);
 }
 #else
 static inline void nebulaos_fr_log(unsigned int type, unsigned int arg,
 				   unsigned long a, unsigned long b) { }
+static inline void nebulaos_fr_log_detail(unsigned int type, unsigned int arg,
+					  unsigned long a, unsigned long b) { }
 static inline void nebulaos_fr_xfer(unsigned int type, unsigned int arg,
 				    unsigned long a, unsigned long b) { }
 #endif

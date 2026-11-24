@@ -369,7 +369,7 @@ static void xburst2_send_ipi_single(int cpu, unsigned int action)
 	}
 #endif
 
-	nebulaos_fr_log(NFR_IPI_SEND, (cpu & 0xff) | (action << 8), _RET_IP_, 0);
+	nebulaos_fr_log_detail(NFR_IPI_SEND, (cpu & 0xff) | (action << 8), _RET_IP_, 0);
 	raw_spin_lock_irqsave(&mailbox->lock, flags);
 	val = readl(mailbox->iobase);
 	writel(action | val, mailbox->iobase);

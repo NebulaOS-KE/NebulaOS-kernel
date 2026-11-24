@@ -18,9 +18,6 @@
  * MIPS32/MIPS64 L2 cache handling
  */
 static unsigned long scache_size __read_mostly;
-/* NebulaOS #27: runtime switch, exposed as nebulaos_freeze.l2_pre_iob
- * (soc-x2000/nebulaos_freeze.c). */
-bool nebulaos_l2_pre_iob __read_mostly = true;
 /*
  * Writeback and invalidate the secondary cache before DMA.
  */
@@ -56,12 +53,11 @@ static void mips_sc_inv(unsigned long addr, unsigned long size)
 	 * it a store still in flight can land in a line after its invalidate,
 	 * and the CPU later reads that stale line instead of the DMA data. */
 	__sync();
-	/* NebulaOS #27 (test build 5): XBurst II L2 prefetcher erratum (Hunter
-	 * Laux, LKML 2026-11-11, seen on X2600): an uncached load BEFORE the
-	 * Hit ops drains prefetches still in flight, so none refills a line
-	 * after its invalidate. Switch: nebulaos_freeze.l2_pre_iob. */
-	if (nebulaos_l2_pre_iob)
-		__fast_iob();
+	/* NebulaOS #27 (test build 5, kept in 1.0.5): XBurst II L2 prefetcher
+	 * erratum (Hunter Laux, LKML 2026-11-11, seen on X2600): an uncached
+	 * load BEFORE the Hit ops drains prefetches still in flight, so none
+	 * refills a line after its invalidate. */
+	__fast_iob();
 	if (size >= scache_size) {
 		if (lsize == 64) {
 			blast_scache64();

@@ -24,11 +24,16 @@
  * area is reset and recording starts. /proc/nebulaos_flightrec shows the
  * live rings; writing a number to it logs a MARK record.
  *
- * The device-register log (readX/writeX, with a full barrier per access) can
- * be switched at run time: write "mmio=0" or "mmio=1" to
- * /proc/nebulaos_flightrec (logged as a CTL record), or boot with
- * nebulaos_flightrec_mmio=0. Default on. The header keeps the current state,
- * so a recording from a frozen boot says whether the register log was on.
+ * Two levels (1.0.5). The event ring and the once-a-second clock pair always
+ * record. The DETAIL level adds what costs more: the device-register log
+ * (readX/writeX, with a full barrier per access), the transfer log (USB
+ * channels, SD/MMC commands) and the inter-CPU interrupt/callback events.
+ * Detail is off at boot unless booted with nebulaos_flightrec_detail=1;
+ * NebulaOS switches it with the log level (Debug and Verbose = on): write
+ * "detail=0" or "detail=1" to /proc/nebulaos_flightrec. "mmio=0|1" switches
+ * the register log alone (for A/B tests). Each change is logged as a CTL
+ * record; the header keeps the current state (bit 0 register log, bit 1
+ * detail), so a recording from a frozen boot says what was recorded.
  *
  * Cost: one irq-save section and five uncached stores per event.
  */
@@ -38,6 +43,7 @@
 #include <linux/kallsyms.h>
 #include <linux/kernel.h>
 #include <linux/math64.h>
+#include <linux/mutex.h>
 #include <linux/nebulaos_flightrec.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -91,7 +97,7 @@ struct nfr_hdr {
 	u32 nent;		/* entries per CPU, power of two */
 	u32 banner_crc;
 	u32 boot_ts;		/* sched_clock() >> 10 when recording started */
-	u32 mmio_on;		/* device-register log on (1) or off (0) */
+	u32 mmio_on;		/* bit 0: register log on; bit 1: detail level on */
 	u32 mmio_n;		/* register-log entries per CPU, power of two */
 	u32 idx[NFR_MAX_CPUS];	/* next slot per CPU (monotonic, masked on use) */
 	u32 mmio_idx[NFR_MAX_CPUS]; /* next register-log slot per CPU */
@@ -107,6 +113,9 @@ EXPORT_SYMBOL_GPL(nebulaos_fr_enabled);
 /* asm/io.h notes device-register accesses only while this is set. */
 int nebulaos_fr_mmio_enabled __read_mostly;
 EXPORT_SYMBOL(nebulaos_fr_mmio_enabled);
+/* Detail level: transfer log and inter-CPU events (nebulaos_flightrec.h). */
+int nebulaos_fr_detail __read_mostly;
+EXPORT_SYMBOL_GPL(nebulaos_fr_detail);
 
 static void __iomem *nfr_base;
 static u32 nfr_ncpu, nfr_nent;
@@ -119,7 +128,7 @@ static DEFINE_PER_CPU(int, nfr_busy);	/* inside __nebulaos_fr_log: its clock rea
 static void *nfr_prev;		/* copy of the previous boot's area, or NULL */
 static size_t nfr_size;
 static bool nfr_param_off;
-static bool nfr_mmio_param_off;
+static bool nfr_detail_param_on;
 
 static int __init nfr_param(char *s)
 {
@@ -128,12 +137,12 @@ static int __init nfr_param(char *s)
 }
 __setup("nebulaos_flightrec=", nfr_param);
 
-static int __init nfr_mmio_param(char *s)
+static int __init nfr_detail_param(char *s)
 {
-	nfr_mmio_param_off = s && (s[0] == '0' || s[0] == 'n' || s[0] == 'N');
+	nfr_detail_param_on = s && (s[0] == '1' || s[0] == 'y' || s[0] == 'Y');
 	return 1;
 }
-__setup("nebulaos_flightrec_mmio=", nfr_mmio_param);
+__setup("nebulaos_flightrec_detail=", nfr_detail_param);
 
 static u32 nfr_banner_crc(void)
 {
@@ -252,8 +261,11 @@ EXPORT_SYMBOL_GPL(__nebulaos_fr_xfer);
  * recording can be lined up with the heartbeat and with Klipper's log. */
 static void nfr_clk_fn(struct timer_list *t)
 {
-	nebulaos_fr_xfer(NFR_CLK, 0, (u32)div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC),
-			 (u32)ktime_get_real_seconds());
+	/* At every level, not only with detail: lines the recording up. */
+	if (READ_ONCE(nebulaos_fr_enabled))
+		__nebulaos_fr_xfer(NFR_CLK, 0,
+				   (u32)div_u64(ktime_get_boottime_ns(), NSEC_PER_MSEC),
+				   (u32)ktime_get_real_seconds());
 	mod_timer(&nfr_clk_timer, jiffies + HZ);
 }
 
@@ -396,9 +408,9 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 	}
 	ev = area + nfr_events_off(h->ncpu, h->mmio_n, h->xfer_n);
 	sym = h->banner_crc == nfr_banner_crc();
-	seq_printf(m, "%s: ncpu=%u entries/cpu=%u symbols=%s register-log=%s\n", what,
+	seq_printf(m, "%s: ncpu=%u entries/cpu=%u symbols=%s register-log=%s detail=%s\n", what,
 		   h->ncpu, h->nent, sym ? "this kernel" : "OTHER kernel (raw addresses)",
-		   h->mmio_on ? "on" : "off");
+		   (h->mmio_on & 1) ? "on" : "off", (h->mmio_on & 2) ? "on" : "off");
 	seq_puts(m, "ts in units of 1.024 us; dt = time before the newest record (ms)\n");
 	seq_puts(m, "not recorded: ordinary memory loads/stores, cache operations other than DMA\n"
 		    "  maintenance, __raw_ register accesses, DMA done by devices themselves;\n"
@@ -456,7 +468,8 @@ static void nfr_show_area(struct seq_file *m, const void *area, const char *what
 				seq_printf(m, " work=0x%08x", r->b);
 				break;
 			case NFR_CTL:
-				seq_printf(m, " register-log=%s", r->arg ? "on" : "off");
+				seq_printf(m, " register-log=%s detail=%s",
+					   (r->arg & 1) ? "on" : "off", (r->arg & 2) ? "on" : "off");
 				break;
 			case NFR_DMAC_IN:
 				seq_printf(m, " %s addr=0x%08x size=%u", nfr_dmac_name(r->arg),
@@ -558,12 +571,41 @@ static int nfr_live_open(struct inode *inode, struct file *file)
 	return single_open_size(file, nfr_live_show, NULL, 6 << 20);
 }
 
+static DEFINE_MUTEX(nfr_ctl_lock);
+
+/* Current state word: bit 0 register log, bit 1 detail (header, CTL). */
+static unsigned int nfr_state_bits(void)
+{
+	return (READ_ONCE(nebulaos_fr_mmio_enabled) ? 1 : 0) |
+	       (READ_ONCE(nebulaos_fr_detail) ? 2 : 0);
+}
+
+static void nfr_publish_state(void)
+{
+	unsigned int st = nfr_state_bits();
+
+	__raw_writel(st, &((struct nfr_hdr __iomem *)nfr_base)->mmio_on);
+	nebulaos_fr_log(NFR_CTL, st, 0, 0);
+	pr_info("nebulaos-flightrec: detail %s, register log %s\n",
+		(st & 2) ? "on" : "off", (st & 1) ? "on" : "off");
+}
+
 static void nfr_set_mmio(unsigned int on)
 {
+	mutex_lock(&nfr_ctl_lock);
 	WRITE_ONCE(nebulaos_fr_mmio_enabled, on);
-	__raw_writel(on, &((struct nfr_hdr __iomem *)nfr_base)->mmio_on);
-	nebulaos_fr_log(NFR_CTL, on, 0, 0);
-	pr_info("nebulaos-flightrec: register log %s\n", on ? "on" : "off");
+	nfr_publish_state();
+	mutex_unlock(&nfr_ctl_lock);
+}
+
+/* Detail on/off: the register log follows it. */
+static void nfr_set_detail(unsigned int on)
+{
+	mutex_lock(&nfr_ctl_lock);
+	WRITE_ONCE(nebulaos_fr_detail, on);
+	WRITE_ONCE(nebulaos_fr_mmio_enabled, on);
+	nfr_publish_state();
+	mutex_unlock(&nfr_ctl_lock);
 }
 
 static ssize_t nfr_live_write(struct file *file, const char __user *buf,
@@ -582,6 +624,13 @@ static ssize_t nfr_live_write(struct file *file, const char __user *buf,
 		if (ret || v > 1)
 			return -EINVAL;
 		nfr_set_mmio(v);
+		return count;
+	}
+	if (!strncmp(k, "detail=", 7)) {
+		ret = kstrtouint(strim(k + 7), 0, &v);
+		if (ret || v > 1)
+			return -EINVAL;
+		nfr_set_detail(v);
 		return count;
 	}
 	ret = kstrtouint_from_user(buf, count, 0, &v);
@@ -680,13 +729,14 @@ static int __init nfr_init(void)
 	proc_create("nebulaos_flightrec", 0600, NULL, &nfr_live_ops);
 	smp_wmb();
 	WRITE_ONCE(nebulaos_fr_enabled, 1);
-	__raw_writel(!nfr_mmio_param_off, &h->mmio_on);
-	WRITE_ONCE(nebulaos_fr_mmio_enabled, !nfr_mmio_param_off);
+	__raw_writel(nfr_detail_param_on ? 3 : 0, &h->mmio_on);
+	WRITE_ONCE(nebulaos_fr_detail, nfr_detail_param_on);
+	WRITE_ONCE(nebulaos_fr_mmio_enabled, nfr_detail_param_on);
 	BUILD_BUG_ON(sizeof(struct nfr_hdr) > NFR_HDR_SIZE);
 	timer_setup(&nfr_clk_timer, nfr_clk_fn, 0);
 	mod_timer(&nfr_clk_timer, jiffies + HZ);
-	pr_info("nebulaos-flightrec: v%u recording at %pa, %u cpus x %u events + %u transfer records, register log %s; previous boot %s\n",
-		NFR_VERSION, &res.start, ncpu, nent, NFR_XFER_N, nfr_mmio_param_off ? "off" : "on",
+	pr_info("nebulaos-flightrec: v%u recording at %pa, %u cpus x %u events + %u transfer records, detail %s; previous boot %s\n",
+		NFR_VERSION, &res.start, ncpu, nent, NFR_XFER_N, nfr_detail_param_on ? "on" : "off",
 		nfr_prev ? "saved" : "had no recording");
 	return 0;
 }

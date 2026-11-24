@@ -131,9 +131,9 @@ static __always_inline void
 csd_do_func(smp_call_func_t func, void *info, struct __call_single_data *csd)
 {
 	trace_csd_function_entry(func, csd);
-	nebulaos_fr_log(NFR_CSD_IN, 0, (unsigned long)func, (unsigned long)info);
+	nebulaos_fr_log_detail(NFR_CSD_IN, 0, (unsigned long)func, (unsigned long)info);
 	func(info);
-	nebulaos_fr_log(NFR_CSD_OUT, 0, (unsigned long)func, 0);
+	nebulaos_fr_log_detail(NFR_CSD_OUT, 0, (unsigned long)func, 0);
 	trace_csd_function_exit(func, csd);
 }
 

@@ -537,13 +537,6 @@ static int ingenicfb_ioctl(struct fb_info *info, unsigned int cmd, unsigned long
 	return 0;
 }
 
-/* #27: cache attribute of the user framebuffer mapping, see ingenicfb_mmap */
-/* Test build 5: default 1 = vendor 6.x (as test3) for the ke-dev baseline;
- * 0 = stock 4.4. Read at mmap time: restart the screen after changing it. */
-static unsigned int fb_cca = 1;
-module_param(fb_cca, uint, 0644);
-MODULE_PARM_DESC(fb_cca, "CCA of the user framebuffer mapping (0-3): 0 stock write-through, 1 vendor 6.x write-acceleration (default)");
-
 int ingenicfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	unsigned long start;
@@ -568,24 +561,15 @@ int ingenicfb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 	pgprot_val(vma->vm_page_prot) |= _CACHE_CACHABLE_NONCOHERENT;
 #else
 	/*
-	 * NebulaOS (#27, 2026-11-23): the vendor 6.x driver mapped the
-	 * framebuffer "Write-Acceleration", _CACHE_CACHABLE_WA, which on XBurst2
-	 * is _CACHE_UNCACHED_ACCELERATED (CCA 1, the core's write-combining
-	 * path). Creality's stock 4.4 soc_fb.ko (jzfb_mmap) clears the cache
-	 * bits and maps CCA 0 (cacheable write-through). The X2000 freezes with
-	 * both hardware threads stopped in plain user code only on Ingenic's
-	 * 5.x/6.x kernels, while the screen keeps writing this mapping; stock
-	 * never uses CCA 1. Map it as stock does. fb_cca selects another CCA
-	 * (read at mmap time) for A/B tests: 1 is the vendor 6.x behaviour.
+	 * NebulaOS (#27): the vendor 6.x mapping, "Write-Acceleration"
+	 * (_CACHE_CACHABLE_WA = _CACHE_UNCACHED_ACCELERATED on XBurst2, CCA 1,
+	 * the core's write-combining path). Creality's stock 4.4 soc_fb.ko maps
+	 * CCA 0 (cacheable write-through) instead. Test builds 3-5 compared
+	 * both (switch ingenic_fb_stage.fb_cca); test build 4/1.0.5-test4 ran
+	 * with CCA 1 and is the tested baseline, so 1.0.5 keeps CCA 1 fixed.
 	 */
-	{
-		/* XBurst II CCA 0-3 only: 4/5 streaming, 6/7 reserved */
-		unsigned int cca = fb_cca <= 3 ? fb_cca : 0;
-
-		pgprot_val(vma->vm_page_prot) |= cca << _CACHE_SHIFT;
-		pr_info("ingenicfb: user mapping CCA %u%s\n", cca,
-			cca == 0 ? " (write-through, as stock 4.4)" : "");
-	}
+	pgprot_val(vma->vm_page_prot) |= _CACHE_UNCACHED_ACCELERATED;
+	pr_info_once("ingenicfb: user mapping CCA 1 (write-acceleration, vendor 6.x)\n");
 #endif
 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
 	                       vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
